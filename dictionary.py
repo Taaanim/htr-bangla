@@ -6,13 +6,13 @@ and Levenshtein distance dynamic programming fuzzy matching for Bangla offline H
 """
 
 import os
-from typing import List, Set, Tuple, Optional
+from typing import List, Set, Tuple, Optional, Dict
 
 
 class TrieNode:
     def __init__(self):
-        self.children = {}
-        self.is_end_of_word = False
+        self.children: Dict[str, 'TrieNode'] = {}
+        self.is_end_of_word: bool = False
 
 
 class BanglaTrie:
@@ -89,20 +89,34 @@ class BanglaPostProcessor:
         self.trie = BanglaTrie()
         self.vocab_words: Set[str] = set()
 
-        # Standard baseline Bangla vocabulary
+        # Comprehensive baseline Bangla vocabulary
         default_words = [
-            "বাংলা", "বাংলাদেশ", "ভাষা", "লেখা", "শব্দ", "বর্ণ", "শিক্ষা", "বিদ্যালয়", "ছাত্র", "শিক্ষক",
-            "বই", "খাতা", "কলম", "পত্রিকা", "জ্ঞান", "বিজ্ঞান", "প্রযুক্তি", "গণিত", "ইতিহাস", "সাহিত্য",
-            "কবিতা", "গল্প", "উপন্যাস", "নাটক", "গান", "সুর", "শিল্পী", "ছবি", "রং", "আকাশ",
-            "বাতাস", "পানি", "মাটি", "আগুন", "নদী", "পাহাড়", "সমুদ্র", "বন", "ফুল", "ফল",
-            "গাছ", "পাখি", "পশু", "মানুষ", "বন্ধু", "পরিবার", "মা", "বাবা", "ভাই", "বোন",
-            "সন্তান", "ঘর", "বাড়ি", "গ্রাম", "শহর", "দেশ", "পৃথিবী", "সূর্য", "চাঁদ", "তারা",
-            "দিন", "রাত", "সকাল", "দুপুর", "সন্ধ্যা", "সময়", "বছর", "মাস", "সপ্তাহ", "আজ",
-            "গতকাল", "আগামীকাল", "কাজ", "জীবন", "আশা", "স্বপ্ন", "আনন্দ", "ভালোবাসা", "শান্তি", "সত্য",
-            "সুন্দর", "নতুন", "পুরাতন", "ভালো", "মন্দ", "বড়", "ছোট", "উচ্চ", "নিম্ন", "সহজ",
-            "কঠিন", "প্রথম", "শেষ", "এক", "দুই", "তিন", "চার", "পাঁচ", "ছয়", "সাত",
-            "আট", "নয়", "দশ", "শত", "হাজার", "লক্ষ", "কোটি"
+            # Nations, Cities & Nature
+            "বাংলা", "বাংলাদেশ", "ঢাকা", "চট্টগ্রাম", "সিলেট", "খুলনা", "রাজশাহী", "বরিশাল", "রংপুর", "ময়মনসিংহ",
+            "ভাষা", "লেখা", "শব্দ", "বর্ণ", "শিক্ষা", "বিদ্যালয়", "মহাবিদ্যালয়", "বিশ্ববিদ্যালয়", "ছাত্র", "শিক্ষক",
+            "বই", "খাতা", "কলম", "পেন্সিল", "কাগজ", "পত্রিকা", "জ্ঞান", "বিজ্ঞান", "প্রযুক্তি", "গণিত", "ইতিহাস",
+            "সাহিত্য", "কবিতা", "গল্প", "উপন্যাস", "নাটক", "গান", "সুর", "শিল্পী", "ছবি", "রং", "আকাশ",
+            "বাতাস", "পানি", "মাটি", "আগুন", "নদী", "পাহাড়", "সমুদ্র", "বন", "ফুল", "ফল", "গাছ", "পাখি", "পশু",
+            # Family & Relationships
+            "মানুষ", "বন্ধু", "পরিবার", "মা", "বাবা", "ভাই", "বোন", "সন্তান", "ছেলে", "মেয়ে", "স্বামী", "স্ত্রী",
+            "পিতা", "মাতা", "দাদা", "দাদি", "নানা", "নানি", "চাচা", "খালা", "মামা", "ফুফু", "আত্মীয়",
+            # Home, Society & Places
+            "ঘর", "বাড়ি", "গ্রাম", "শহর", "দেশ", "পৃথিবী", "সূর্য", "চাঁদ", "তারা", "বায়ু", "বৃষ্টি", "মেঘ",
+            "দিন", "রাত", "সকাল", "দুপুর", "সন্ধ্যা", "সময়", "বছর", "মাস", "সপ্তাহ", "আজ", "গতকাল", "আগামীকাল",
+            "ঘণ্টা", "মিনিট", "সেকেন্ড", "ঋতু", "গ্রীষ্ম", "বর্ষা", "শরৎ", "হেমেন্ত", "শীত", "বসন্ত",
+            # Activities & Concepts
+            "কাজ", "জীবন", "আশা", "স্বপ্ন", "আনন্দ", "ভালোবাসা", "শান্তি", "সত্য", "সুন্দর", "নতুন", "পুরাতন",
+            "ভালো", "মন্দ", "বড়", "ছোট", "উচ্চ", "নিম্ন", "সহজ", "কঠিন", "প্রথম", "শেষ", "স্বাধীনতা", "সংগ্রাম",
+            "সংস্কৃতি", "ঐতিহ্য", "উৎসব", "মেলা", "খেলারাম", "খেলাধুলা", "ফুটবল", "ক্রিকেট", "বিজয়", "পরাজয়",
+            # Numbers
+            "এক", "দুই", "তিন", "চার", "পাঁচ", "ছয়", "সাত", "আট", "নয়", "দশ", "শত", "হাজার", "লক্ষ", "কোটি",
+            "প্রথম", "দ্বিতীয়", "তৃতীয়", "চতুর্থ", "পঞ্চম", "ষষ্ঠ", "সপ্তম", "অষ্টম", "নবম", "দশম",
+            # Common Verbs & Adjectives
+            "করা", "হওয়া", "যাওয়া", "আসা", "বলা", "শোনা", "দেখা", "পড়া", "লেখা", "খাওয়া", "শোয়া", "বসা",
+            "হাঁটা", "চলা", "দেওয়া", "নেওয়া", "ভাবা", "বোঝা", "শেখা", "জানা", "মানামানি", "চিন্তা", "চেষ্টা",
+            "মহান", "পবিত্র", "উজ্জ্বল", "গভীর", "শান্ত", "ধীর", "দ্রুত", "সহজ", "কঠিন", "মিষ্টি", "তিতা", "ঝাল"
         ]
+
         for word in default_words:
             self.add_word(word)
 
@@ -110,8 +124,10 @@ class BanglaPostProcessor:
             for word in custom_words:
                 self.add_word(word)
 
-        if dictionary_path and os.path.isfile(dictionary_path):
-            self.load_dictionary_file(dictionary_path)
+        # Check for local dictionary text file if provided or if bangla_dictionary.txt exists
+        dict_file = dictionary_path or "bangla_dictionary.txt"
+        if os.path.isfile(dict_file):
+            self.load_dictionary_file(dict_file)
 
     def add_word(self, word: str) -> None:
         word = word.strip()
@@ -119,13 +135,16 @@ class BanglaPostProcessor:
             self.trie.insert(word)
             self.vocab_words.add(word)
 
-    def load_dictionary_file(self, file_path: str) -> None:
-        """Loads words from a plain text file (one word per line)."""
+    def load_dictionary_file(self, file_path: str) -> int:
+        """Loads words from a plain text file (one word per line). Returns total words added."""
+        count = 0
         with open(file_path, "r", encoding="utf-8") as f:
             for line in f:
                 word = line.strip()
                 if word:
                     self.add_word(word)
+                    count += 1
+        return count
 
     def is_valid_word(self, word: str) -> bool:
         """Returns True if the predicted word is in the dictionary."""
@@ -168,7 +187,8 @@ class BanglaPostProcessor:
 
 if __name__ == "__main__":
     post_proc = BanglaPostProcessor()
-    test_word = "বাংলাদশে"  # Typo for "বাংলাদেশ"
+    print(f"Total built-in dictionary vocabulary: {len(post_proc.vocab_words)} words")
+    test_word = "বাংলাদশে"
     is_valid = post_proc.is_valid_word(test_word)
     corrected, dist = post_proc.correct_word(test_word)
     print(f"Original: '{test_word}' | Valid: {is_valid} | Corrected: '{corrected}' (Distance: {dist})")
