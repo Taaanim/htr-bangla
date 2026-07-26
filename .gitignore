@@ -3,6 +3,13 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Node Dependencies & Build Artifacts
+node_modules/
+dist/
+web_app/server/node_modules/
+web_app/client/node_modules/
+web_app/client/dist/
+
 # PyTorch Checkpoints
 checkpoints/
 *.pth
