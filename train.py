@@ -171,7 +171,8 @@ def main():
             print(f"Pre-Train Epoch [{epoch}/{args.pretrain_epochs}] Completed | Loss: {loss:.4f} | Time: {elapsed:.2f}s")
 
         torch.save(model.state_dict(), os.path.join(args.save_dir, "pretrain_model.pth"))
-        print(f"Saved pre-trained checkpoint to {args.save_dir}/pretrain_model.pth")
+        torch.save(model.state_dict(), "pretrain_model.pth")
+        print(f"Saved pre-trained checkpoint to {args.save_dir}/pretrain_model.pth and ./pretrain_model.pth")
 
     # ----------------------------------------------------
     # STAGE 2: Local Dataset Fine-Tuning
@@ -196,7 +197,8 @@ def main():
             print(f"Fine-Tune Epoch [{epoch}/{args.finetune_epochs}] Completed | Loss: {loss:.4f} | CER: {cer:.4f} | WER: {wer:.4f} | Lexicon Match: {dict_match*100:.1f}% | Time: {elapsed:.2f}s")
 
         torch.save(model.state_dict(), os.path.join(args.save_dir, "finetune_model.pth"))
-        print(f"Saved fine-tuned checkpoint to {args.save_dir}/finetune_model.pth")
+        torch.save(model.state_dict(), "finetune_model.pth")
+        print(f"Saved fine-tuned checkpoint to {args.save_dir}/finetune_model.pth and ./finetune_model.pth")
     else:
         print(f"Local dataset path '{args.local_dataset_dir}' not found. Skipping Stage 2.")
 
@@ -236,7 +238,8 @@ def main():
 
     final_model_path = os.path.join(args.save_dir, "final_htr_model.pth")
     torch.save(model.state_dict(), final_model_path)
-    print(f"\nSuccessfully completed all training stages! Final SOTA model saved to: {final_model_path}")
+    torch.save(model.state_dict(), "final_htr_model.pth")
+    print(f"\nSuccessfully completed all training stages! Final SOTA model saved to: {final_model_path} and ./final_htr_model.pth")
 
 
 if __name__ == "__main__":
