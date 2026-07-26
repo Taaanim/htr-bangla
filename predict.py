@@ -7,6 +7,8 @@ and applies Trie-based dictionary & Levenshtein post-processing refinement.
 """
 
 import os
+import sys
+import json
 import argparse
 from typing import Dict, Any, Optional
 import numpy as np
@@ -47,9 +49,14 @@ class BanglaHTRPredictor:
         if os.path.exists(model_path):
             state_dict = torch.load(model_path, map_location=self.device)
             self.model.load_state_dict(state_dict)
-            print(f"Successfully loaded HTR model checkpoint from: {model_path}")
+        elif os.path.exists("checkpoints/finetune_model.pth"):
+            state_dict = torch.load("checkpoints/finetune_model.pth", map_location=self.device)
+            self.model.load_state_dict(state_dict)
+        elif os.path.exists("checkpoints/pretrain_model.pth"):
+            state_dict = torch.load("checkpoints/pretrain_model.pth", map_location=self.device)
+            self.model.load_state_dict(state_dict)
         else:
-            print(f"Warning: Checkpoint path '{model_path}' not found. Using randomly initialized weights.")
+            pass
 
         self.model.eval()
 
@@ -127,38 +134,43 @@ def main():
     parser.add_argument("--image", type=str, help="Path to input handwriting image")
     parser.add_argument("--model-path", type=str, default="checkpoints/final_htr_model.pth", help="Model checkpoint path")
     parser.add_argument("--metadata-csv", type=str, default="Bangla dataset/metaData_img.csv", help="Metadata CSV path")
+    parser.add_argument("--json", action="store_true", help="Output result as JSON string")
     args = parser.parse_args()
 
     predictor = BanglaHTRPredictor(model_path=args.model_path, metadata_csv=args.metadata_csv)
 
     if args.image and os.path.exists(args.image):
         result = predictor.predict(args.image)
-        print("\n" + "=" * 50)
-        print("HTR PREDICTION RESULTS")
-        print("=" * 50)
-        print(f"Image Path          : {args.image}")
-        print(f"Raw Model Prediction : '{result['raw_prediction']}'")
-        print(f"Corrected Bangla Text: '{result['corrected_prediction']}'")
-        print(f"Confidence Score     : {result['confidence_score']}%")
-        print(f"Dictionary Validated : {result['is_in_dictionary']}")
-        print("=" * 50)
+        if args.json:
+            print(json.dumps(result))
+        else:
+            print("\n" + "=" * 50)
+            print("HTR PREDICTION RESULTS")
+            print("=" * 50)
+            print(f"Image Path          : {args.image}")
+            print(f"Raw Model Prediction : '{result['raw_prediction']}'")
+            print(f"Corrected Bangla Text: '{result['corrected_prediction']}'")
+            print(f"Confidence Score     : {result['confidence_score']}%")
+            print(f"Dictionary Validated : {result['is_in_dictionary']}")
+            print("=" * 50)
     else:
-        # Run demonstration on a sample from local dataset or synthetic text
-        print("\nNo input image provided. Running demonstration on a synthetic sample...")
         from dataset import BanglaSyntheticTextGenerator
         gen = BanglaSyntheticTextGenerator()
         sample_img = gen.render_text("বাংলাদেশ")
-
         result = predictor.predict(sample_img)
-        print("\n" + "=" * 50)
-        print("HTR DEMO PREDICTION RESULTS")
-        print("=" * 50)
-        print(f"Ground Truth Text   : 'বাংলাদেশ'")
-        print(f"Raw Model Prediction : '{result['raw_prediction']}'")
-        print(f"Corrected Bangla Text: '{result['corrected_prediction']}'")
-        print(f"Confidence Score     : {result['confidence_score']}%")
-        print(f"Dictionary Validated : {result['is_in_dictionary']}")
-        print("=" * 50)
+
+        if args.json:
+            print(json.dumps(result))
+        else:
+            print("\n" + "=" * 50)
+            print("HTR DEMO PREDICTION RESULTS")
+            print("=" * 50)
+            print(f"Ground Truth Text   : 'বাংলাদেশ'")
+            print(f"Raw Model Prediction : '{result['raw_prediction']}'")
+            print(f"Corrected Bangla Text: '{result['corrected_prediction']}'")
+            print(f"Confidence Score     : {result['confidence_score']}%")
+            print(f"Dictionary Validated : {result['is_in_dictionary']}")
+            print("=" * 50)
 
 
 if __name__ == "__main__":
