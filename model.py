@@ -1,175 +1,138 @@
 """
-model.py - Hybrid Visual Feature Extractor (ResNet/ConvNeXt) + BiLSTM Sequence Encoder
+model.py — SE-ResNet CNN for Bangla Character Classification
 
-Implements fine-grained visual stroke feature extraction, sequence context modeling via BiLSTM,
-CTC character prediction output head, and policy/value projections for the RL Agent.
+Proven architecture from the working AI Project II:
+- Squeeze-and-Excitation (SE) attention blocks for channel re-weighting
+- 4 residual stages: 64 → 128 → 256 → 512 channels
+- Global Average Pooling → deep classifier head
+- Kaiming initialization for stable training
 """
 
-import math
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
-class ConvNeXtBlock(nn.Module):
-    """ConvNeXt-style block for fine-grained visual stroke extraction."""
-
-    def __init__(self, dim: int, drop_path: float = 0.0):
+class SEBlock(nn.Module):
+    """Squeeze-and-Excitation: learns to re-weight feature channels."""
+    def __init__(self, ch, reduction=8):
         super().__init__()
-        self.dwconv = nn.Conv2d(dim, dim, kernel_size=7, padding=3, groups=dim)  # depthwise conv
-        self.norm = nn.GroupNorm(1, dim)
-        self.pwconv1 = nn.Linear(dim, 4 * dim)  # pointwise convs
-        self.act = nn.GELU()
-        self.pwconv2 = nn.Linear(4 * dim, dim)
-        self.drop_path = drop_path
+        self.se = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(ch, ch // reduction, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(ch // reduction, ch, bias=False),
+            nn.Sigmoid()
+        )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        input_x = x
-        x = self.dwconv(x)
-        x = self.norm(x)
-        x = x.permute(0, 2, 3, 1)  # (N, C, H, W) -> (N, H, W, C)
-        x = self.pwconv1(x)
-        x = self.act(x)
-        x = self.pwconv2(x)
-        x = x.permute(0, 3, 1, 2)  # (N, H, W, C) -> (N, C, H, W)
-        return input_x + x
+    def forward(self, x):
+        scale = self.se(x).view(x.size(0), -1, 1, 1)
+        return x * scale
 
 
-class VisualFeatureExtractor(nn.Module):
-    """Hybrid ConvNeXt/ResNet Visual Feature Extractor for Bangla HTR."""
-
-    def __init__(self, in_channels: int = 1, hidden_dim: int = 256):
+class ResidualBlock(nn.Module):
+    """Residual block with SE attention and optional dropout."""
+    def __init__(self, in_ch, out_ch, stride=1, drop=0.0):
         super().__init__()
-        # Stem: Downsample height by 4x, width by 2x
-        self.stem = nn.Sequential(
-            nn.Conv2d(in_channels, 64, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm2d(64),
-            nn.GELU(),
-            nn.Conv2d(64, 128, kernel_size=3, stride=(2, 1), padding=1),
-            nn.BatchNorm2d(128),
-            nn.GELU()
-        )
+        self.conv1 = nn.Conv2d(in_ch, out_ch, 3, stride=stride, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(out_ch)
+        self.conv2 = nn.Conv2d(out_ch, out_ch, 3, stride=1, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(out_ch)
+        self.relu = nn.ReLU(inplace=True)
+        self.se = SEBlock(out_ch)
+        self.drop = nn.Dropout2d(drop) if drop > 0 else nn.Identity()
 
-        # Stage 1: ConvNeXt blocks
-        self.stage1 = nn.Sequential(
-            ConvNeXtBlock(128),
-            ConvNeXtBlock(128)
-        )
+        self.shortcut = nn.Sequential()
+        if stride != 1 or in_ch != out_ch:
+            self.shortcut = nn.Sequential(
+                nn.Conv2d(in_ch, out_ch, 1, stride=stride, bias=False),
+                nn.BatchNorm2d(out_ch)
+            )
 
-        # Downsample Stage 2: Reduce height further
-        self.downsample = nn.Sequential(
-            nn.Conv2d(128, hidden_dim, kernel_size=(3, 3), stride=(2, 1), padding=(1, 1)),
-            nn.BatchNorm2d(hidden_dim),
-            nn.GELU(),
-            nn.Conv2d(hidden_dim, hidden_dim, kernel_size=(3, 1), stride=(2, 1), padding=(1, 0)),
-            nn.BatchNorm2d(hidden_dim),
-            nn.GELU()
-        )
-
-        # Stage 3: Feature refinement
-        self.stage2 = nn.Sequential(
-            ConvNeXtBlock(hidden_dim),
-            ConvNeXtBlock(hidden_dim)
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Input: (B, C, H, W)
-        Output: (B, T, D) where T = W_feat, D = hidden_dim
-        """
-        x = self.stem(x)
-        x = self.stage1(x)
-        x = self.downsample(x)
-        x = self.stage2(x)
-
-        # Adaptive height pooling to collapse H dimension to 1
-        x = F.adaptive_avg_pool2d(x, (1, None))  # (B, hidden_dim, 1, W_feat)
-        x = x.squeeze(2)  # (B, hidden_dim, W_feat)
-        x = x.permute(0, 2, 1)  # (B, W_feat, hidden_dim)
-        return x
-
-
-class SequenceEncoder(nn.Module):
-    """Multi-layer Bidirectional LSTM Sequence Encoder."""
-
-    def __init__(self, input_dim: int = 256, hidden_dim: int = 256, num_layers: int = 2, dropout: float = 0.2):
-        super().__init__()
-        self.bilstm = nn.LSTM(
-            input_size=input_dim,
-            hidden_size=hidden_dim,
-            num_layers=num_layers,
-            bidirectional=True,
-            batch_first=True,
-            dropout=dropout if num_layers > 1 else 0.0
-        )
-        self.proj = nn.Linear(hidden_dim * 2, hidden_dim)
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Input: (B, T, input_dim)
-        Output: (B, T, hidden_dim)
-        """
-        lstm_out, _ = self.bilstm(x)
-        out = self.proj(lstm_out)
-        out = self.dropout(out)
+    def forward(self, x):
+        out = self.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        out = self.se(out)
+        out = self.drop(out)
+        out += self.shortcut(x)
+        out = self.relu(out)
         return out
 
 
-class HTRHybridModel(nn.Module):
-    """
-    End-to-End Hybrid HTR Model:
-    Visual Feature Extractor + Sequence Encoder + CTC Head + RL Projections
-    """
+class BestCNN(nn.Module):
+    """SE-ResNet classifier for Bangla handwritten character recognition.
 
-    def __init__(self, num_classes: int = 127, hidden_dim: int = 256, in_channels: int = 1):
+    Input:  (B, 3, 32, 32) — RGB images resized to 32×32
+    Output: (B, num_classes) — logits for each character class
+    """
+    def __init__(self, num_classes):
         super().__init__()
-        self.num_classes = num_classes
-        self.hidden_dim = hidden_dim
+        self.features = nn.Sequential(
+            # Stem: 3 -> 64, 32×32
+            nn.Conv2d(3, 64, 3, padding=1, bias=False),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
 
-        # 1. Visual Feature Extractor
-        self.visual_extractor = VisualFeatureExtractor(in_channels=in_channels, hidden_dim=hidden_dim)
+            # Block 1: 64->64, 32×32 -> 16×16
+            ResidualBlock(64, 64, drop=0.05),
+            ResidualBlock(64, 64, drop=0.05),
+            nn.MaxPool2d(2, 2),
 
-        # 2. Sequence Encoder
-        self.sequence_encoder = SequenceEncoder(input_dim=hidden_dim, hidden_dim=hidden_dim, num_layers=2)
+            # Block 2: 64->128, 16×16 -> 8×8
+            ResidualBlock(64, 128, drop=0.10),
+            ResidualBlock(128, 128, drop=0.10),
+            nn.MaxPool2d(2, 2),
 
-        # 3. Base CTC Classifier Head
-        self.ctc_head = nn.Linear(hidden_dim, num_classes)
+            # Block 3: 128->256, 8×8 -> 4×4
+            ResidualBlock(128, 256, drop=0.15),
+            ResidualBlock(256, 256, drop=0.15),
+            nn.MaxPool2d(2, 2),
 
-        # 4. Projections for RL Policy Agent
-        self.rl_actor_head = nn.Linear(hidden_dim, num_classes)
-        self.rl_critic_head = nn.Linear(hidden_dim, 1)
+            # Block 4: 256->512, 4×4 -> global pool
+            ResidualBlock(256, 512, drop=0.20),
+            ResidualBlock(512, 512, drop=0.20),
+        )
+        self.classifier = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(512, 512),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.4),
+            nn.Linear(512, 256),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.3),
+            nn.Linear(256, num_classes)
+        )
+        self._init_weights()
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Standard forward pass for pre-training / CTC loss computation.
-        Input: (B, C, H, W)
-        Output: CTC Logits (B, T, num_classes)
-        """
-        features = self.visual_extractor(x)
-        encoded_seq = self.sequence_encoder(features)
-        ctc_logits = self.ctc_head(encoded_seq)
-        return ctc_logits
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Linear):
+                nn.init.kaiming_normal_(m.weight)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
 
-    def extract_features(self, x: torch.Tensor) -> torch.Tensor:
-        """Extracts contextualized sequence embeddings (B, T, hidden_dim)."""
-        features = self.visual_extractor(x)
-        encoded_seq = self.sequence_encoder(features)
-        return encoded_seq
+    def forward(self, x):
+        return self.classifier(self.features(x))
 
-    def get_rl_predictions(self, encoded_seq: torch.Tensor):
-        """Returns RL Policy action logits (B, T, num_classes) and State values (B, T, 1)."""
-        action_logits = self.rl_actor_head(encoded_seq)
-        state_values = self.rl_critic_head(encoded_seq).squeeze(-1)
-        return action_logits, state_values
+    def get_features(self, x):
+        """Returns 512-dim feature vector (for RL agent)."""
+        feat = self.features(x)
+        feat = nn.functional.adaptive_avg_pool2d(feat, 1).flatten(1)
+        return feat
 
 
 if __name__ == "__main__":
-    model = HTRHybridModel(num_classes=127, hidden_dim=256)
-    dummy_input = torch.randn(4, 1, 64, 256)
-    logits = model(dummy_input)
-    print(f"Input shape: {dummy_input.shape} -> CTC Logits shape: {logits.shape}")
+    model = BestCNN(num_classes=122)
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"BestCNN — {total_params:,} total params, {trainable:,} trainable")
 
-    encoded = model.extract_features(dummy_input)
-    act_logits, st_vals = model.get_rl_predictions(encoded)
-    print(f"Encoded shape: {encoded.shape} -> Action Logits: {act_logits.shape}, State Values: {st_vals.shape}")
+    dummy = torch.randn(2, 3, 32, 32)
+    out = model(dummy)
+    print(f"Input: {dummy.shape} → Output: {out.shape}")

@@ -12,135 +12,76 @@ app.use(cors());
 app.use(express.json({ limit: "20mb" }));
 app.use(express.urlencoded({ extended: true, limit: "20mb" }));
 
-// Upload directory setup
 const uploadDir = path.join(__dirname, "uploads");
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
-}
+if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, uploadDir),
-  filename: (req, file, cb) => cb(null, `upload_${Date.now()}_${file.originalname || "image.png"}`)
+  filename: (req, file, cb) => cb(null, `upload_${Date.now()}.png`)
 });
-
 const upload = multer({ storage });
 
-// Project Root Directory (one level up from web_app/server)
 const PROJECT_ROOT = path.resolve(__dirname, "../../");
 
-/**
- * Executes python predict.py command and returns JSON prediction
- */
-function runPythonPrediction(imagePath) {
+function runPython(cmd) {
   return new Promise((resolve, reject) => {
-    const scriptPath = path.join(PROJECT_ROOT, "predict.py");
-    const cmd = `python3 "${scriptPath}" --image "${imagePath}" --json`;
-
-    exec(cmd, { cwd: PROJECT_ROOT }, (error, stdout, stderr) => {
-      if (error) {
-        console.error("Python Exec Error:", stderr || error.message);
-        return reject(new Error(stderr || error.message));
-      }
+    exec(cmd, {
+      cwd: PROJECT_ROOT,
+      env: { ...process.env, PYTHONIOENCODING: "utf-8" }
+    }, (error, stdout, stderr) => {
+      if (error) return reject(new Error(stderr || error.message));
       try {
-        // Extract JSON string from stdout
         const lines = stdout.trim().split("\n");
-        const jsonLine = lines.find(l => l.startsWith("{") && l.endsWith("}")) || lines[lines.length - 1];
-        const parsed = JSON.parse(jsonLine);
-        resolve(parsed);
-      } catch (parseErr) {
-        console.error("JSON Parse Error:", stdout);
-        reject(new Error("Failed to parse prediction output from model."));
+        const jsonLine = lines.find(l => l.startsWith("{")) || lines[lines.length - 1];
+        resolve(JSON.parse(jsonLine));
+      } catch (e) {
+        reject(new Error("Failed to parse model output"));
       }
     });
   });
 }
 
-// 1. Healthcheck Route
+// Health check
 app.get("/api/health", (req, res) => {
-  const checkpointsDir = path.join(PROJECT_ROOT, "checkpoints");
-  const finalModel = path.join(checkpointsDir, "final_htr_model.pth");
-  const finetuneModel = path.join(checkpointsDir, "finetune_model.pth");
-
-  const modelAvailable = fs.existsSync(finalModel) || fs.existsSync(finetuneModel);
-
+  const weightsExists = fs.existsSync(path.join(PROJECT_ROOT, "checkpoints", "best_cnn_model_weights.pth"))
+    || fs.existsSync(path.join(PROJECT_ROOT, "best_cnn_model_weights.pth"));
   res.json({
     status: "online",
-    modelAvailable,
-    activeCheckpoint: fs.existsSync(finalModel) ? "final_htr_model.pth" : (fs.existsSync(finetuneModel) ? "finetune_model.pth" : "initializing"),
+    modelAvailable: weightsExists,
+    activeCheckpoint: weightsExists ? "best_cnn_model_weights.pth" : "not trained yet",
     timestamp: new Date().toISOString()
   });
 });
 
-// 2. Predict Image File Upload Route
+// Predict image (canvas base64 or file upload)
 app.post("/api/predict/image", upload.single("image"), async (req, res) => {
-  let tempFilePath = null;
+  let tempFile = null;
   try {
+    const mode = req.body.mode || "char";
+
     if (req.file) {
-      tempFilePath = req.file.path;
+      tempFile = req.file.path;
     } else if (req.body.imageBase64) {
-      // Base64 canvas data
-      const base64Data = req.body.imageBase64.replace(/^data:image\/\w+;base64,/, "");
-      tempFilePath = path.join(uploadDir, `canvas_${Date.now()}.png`);
-      fs.writeFileSync(tempFilePath, Buffer.from(base64Data, "base64"));
+      const b64 = req.body.imageBase64.replace(/^data:image\/\w+;base64,/, "");
+      tempFile = path.join(uploadDir, `canvas_${Date.now()}.png`);
+      fs.writeFileSync(tempFile, Buffer.from(b64, "base64"));
     } else {
-      return res.status(400).json({ error: "No image file or base64 data provided." });
+      return res.status(400).json({ error: "No image provided" });
     }
 
-    const prediction = await runPythonPrediction(tempFilePath);
-
-    res.json({
-      success: true,
-      prediction
-    });
+    const script = path.join(PROJECT_ROOT, "predict.py");
+    const cmd = `python3 "${script}" --image "${tempFile}" --mode ${mode} --json`;
+    const prediction = await runPython(cmd);
+    res.json({ success: true, prediction });
   } catch (err) {
-    console.error("Prediction Route Error:", err);
     res.status(500).json({ success: false, error: err.message });
   } finally {
-    if (tempFilePath && fs.existsSync(tempFilePath)) {
-      try { fs.unlinkSync(tempFilePath); } catch (e) {}
+    if (tempFile && fs.existsSync(tempFile)) {
+      try { fs.unlinkSync(tempFile); } catch (e) {}
     }
   }
-});
-
-// 3. Predict Synthetic Text Route
-app.post("/api/predict/text", async (req, res) => {
-  const { text } = req.body;
-  if (!text || typeof text !== "string") {
-    return res.status(400).json({ error: "Valid Bangla text string is required." });
-  }
-
-  // Create temporary synthetic image via python script snippet
-  const tempImgPath = path.join(uploadDir, `synth_${Date.now()}.png`);
-  const pythonScript = `
-from dataset import BanglaSyntheticTextGenerator
-gen = BanglaSyntheticTextGenerator()
-img = gen.render_text("${text.replace(/"/g, '\\"')}")
-img.save("${tempImgPath}")
-`;
-
-  const scriptFile = path.join(uploadDir, `render_${Date.now()}.py`);
-  fs.writeFileSync(scriptFile, pythonScript);
-
-  exec(`python3 "${scriptFile}"`, { cwd: PROJECT_ROOT }, async (err) => {
-    try { fs.unlinkSync(scriptFile); } catch (e) {}
-
-    if (err || !fs.existsSync(tempImgPath)) {
-      return res.status(500).json({ error: "Failed to render synthetic text image." });
-    }
-
-    try {
-      const prediction = await runPythonPrediction(tempImgPath);
-      res.json({ success: true, textInput: text, prediction });
-    } catch (predErr) {
-      res.status(500).json({ error: predErr.message });
-    } finally {
-      if (fs.existsSync(tempImgPath)) {
-        try { fs.unlinkSync(tempImgPath); } catch (e) {}
-      }
-    }
-  });
 });
 
 app.listen(PORT, () => {
-  console.log(`Bangla HTR API Express Server running on http://localhost:${PORT}`);
+  console.log(`Bangla HTR API running on http://localhost:${PORT}`);
 });

@@ -4,61 +4,56 @@ import './index.css';
 const API_BASE = 'http://localhost:5001/api';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState('canvas'); // 'canvas' | 'upload' | 'synthetic'
+  const [activeTab, setActiveTab] = useState('upload'); // 'upload' or 'canvas'
+  const [ocrMode, setOcrMode] = useState('document');   // 'document' or 'char'
   const [health, setHealth] = useState(null);
   const [loading, setLoading] = useState(false);
   const [prediction, setPrediction] = useState(null);
   const [error, setError] = useState(null);
+  const [selectedCharDetail, setSelectedCharDetail] = useState(null);
 
-  // Canvas State
   const canvasRef = useRef(null);
   const [isDrawing, setIsDrawing] = useState(false);
   const [brushWidth, setBrushWidth] = useState(6);
 
-  // Upload State
   const [selectedFile, setSelectedFile] = useState(null);
   const [previewUrl, setPreviewUrl] = useState(null);
 
-  // Synthetic Text State
-  const [synthText, setSynthText] = useState('বাংলাদেশ');
-
-  // Fetch Health Check Status
-  useEffect(() => {
-    fetchHealth();
-  }, []);
+  useEffect(() => { fetchHealth(); }, []);
 
   const fetchHealth = async () => {
     try {
       const res = await fetch(`${API_BASE}/health`);
-      const data = await res.json();
-      setHealth(data);
-    } catch (err) {
-      console.warn("API Server connection warning:", err);
-      setHealth({ status: "connecting", activeCheckpoint: "Checking Server..." });
-    }
+      setHealth(await res.json());
+    } catch { setHealth({ status: "connecting" }); }
   };
 
-  // ----------------------------------------------------
-  // Canvas Handlers
-  // ----------------------------------------------------
   useEffect(() => {
     if (activeTab === 'canvas' && canvasRef.current) {
-      const canvas = canvasRef.current;
-      const ctx = canvas.getContext('2d');
-      // Fill white background
+      const ctx = canvasRef.current.getContext('2d');
       ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillRect(0, 0, canvasRef.current.width, canvasRef.current.height);
     }
   }, [activeTab]);
 
-  const startDrawing = (e) => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    const rect = canvas.getBoundingClientRect();
-    const x = (e.clientX || e.touches?.[0]?.clientX) - rect.left;
-    const y = (e.clientY || e.touches?.[0]?.clientY) - rect.top;
+  const getPos = (e) => {
+    if (!canvasRef.current) return { x: 0, y: 0 };
+    const rect = canvasRef.current.getBoundingClientRect();
+    const clientX = e.touches && e.touches[0] ? e.touches[0].clientX : e.clientX;
+    const clientY = e.touches && e.touches[0] ? e.touches[0].clientY : e.clientY;
 
+    const scaleX = canvasRef.current.width / rect.width;
+    const scaleY = canvasRef.current.height / rect.height;
+
+    const x = (clientX - rect.left) * scaleX;
+    const y = (clientY - rect.top) * scaleY;
+    return { x, y };
+  };
+
+  const startDrawing = (e) => {
+    if (e.type === 'touchstart') e.preventDefault();
+    const ctx = canvasRef.current.getContext('2d');
+    const { x, y } = getPos(e);
     ctx.beginPath();
     ctx.moveTo(x, y);
     ctx.lineCap = 'round';
@@ -70,299 +65,268 @@ export default function App() {
 
   const draw = (e) => {
     if (!isDrawing) return;
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext('2d');
-    const rect = canvas.getBoundingClientRect();
-    const x = (e.clientX || e.touches?.[0]?.clientX) - rect.left;
-    const y = (e.clientY || e.touches?.[0]?.clientY) - rect.top;
-
+    if (e.type === 'touchmove') e.preventDefault();
+    const ctx = canvasRef.current.getContext('2d');
+    const { x, y } = getPos(e);
     ctx.lineTo(x, y);
     ctx.stroke();
   };
 
-  const stopDrawing = () => {
-    setIsDrawing(false);
-  };
+  const stopDrawing = () => setIsDrawing(false);
 
   const clearCanvas = () => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    setPrediction(null);
-    setError(null);
+    if (canvasRef.current) {
+      const ctx = canvasRef.current.getContext('2d');
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+    }
+    setPrediction(null); setError(null); setSelectedCharDetail(null);
   };
 
   const predictCanvas = async () => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const imageBase64 = canvas.toDataURL('image/png');
-
-    setLoading(true);
-    setError(null);
-
+    const imageBase64 = canvasRef.current.toDataURL('image/png');
+    setLoading(true); setError(null); setSelectedCharDetail(null);
     try {
       const res = await fetch(`${API_BASE}/predict/image`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ imageBase64 })
+        body: JSON.stringify({ imageBase64, mode: ocrMode })
       });
       const data = await res.json();
-
-      if (data.success) {
-        setPrediction(data.prediction);
-      } else {
-        setError(data.error || "Prediction failed.");
-      }
-    } catch (err) {
-      setError("Failed to connect to HTR API Server on localhost:5001");
-    } finally {
-      setLoading(false);
-    }
+      if (data.success) setPrediction(data.prediction);
+      else setError(data.error || "Prediction failed");
+    } catch { setError("Cannot connect to API server on localhost:5001"); }
+    finally { setLoading(false); }
   };
 
-  // ----------------------------------------------------
-  // File Upload Handlers
-  // ----------------------------------------------------
   const handleFileChange = (e) => {
     const file = e.target.files[0];
     if (file) {
       setSelectedFile(file);
       setPreviewUrl(URL.createObjectURL(file));
-      setPrediction(null);
-      setError(null);
+      setPrediction(null); setError(null); setSelectedCharDetail(null);
     }
   };
 
-  const predictImageFile = async () => {
+  const predictFile = async () => {
     if (!selectedFile) return;
-    setLoading(true);
-    setError(null);
-
+    setLoading(true); setError(null); setSelectedCharDetail(null);
     const formData = new FormData();
     formData.append('image', selectedFile);
-
+    formData.append('mode', ocrMode);
     try {
-      const res = await fetch(`${API_BASE}/predict/image`, {
-        method: 'POST',
-        body: formData
-      });
+      const res = await fetch(`${API_BASE}/predict/image`, { method: 'POST', body: formData });
       const data = await res.json();
-
-      if (data.success) {
-        setPrediction(data.prediction);
-      } else {
-        setError(data.error || "Prediction failed.");
-      }
-    } catch (err) {
-      setError("Failed to connect to HTR API Server on localhost:5001");
-    } finally {
-      setLoading(false);
-    }
+      if (data.success) setPrediction(data.prediction);
+      else setError(data.error || "Prediction failed");
+    } catch { setError("Cannot connect to API server on localhost:5001"); }
+    finally { setLoading(false); }
   };
 
-  // ----------------------------------------------------
-  // Synthetic Text Handlers
-  // ----------------------------------------------------
-  const predictSyntheticText = async () => {
-    if (!synthText.trim()) return;
-    setLoading(true);
-    setError(null);
-
-    try {
-      const res = await fetch(`${API_BASE}/predict/text`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: synthText })
-      });
-      const data = await res.json();
-
-      if (data.success) {
-        setPrediction(data.prediction);
-      } else {
-        setError(data.error || "Prediction failed.");
-      }
-    } catch (err) {
-      setError("Failed to connect to HTR API Server on localhost:5001");
-    } finally {
-      setLoading(false);
-    }
-  };
+  const confColor = (c) => c >= 90 ? '#10b981' : c >= 70 ? '#f59e0b' : '#ef4444';
 
   return (
     <div className="app-container">
-      {/* App Header */}
       <header className="app-header">
-        <div className="badge-sota">⚡ SOTA Hybrid Model • ConvNeXt + BiLSTM + RL Agent</div>
-        <h1>Bangla <span>Handwritten Text Recognition</span></h1>
-        <p>Offline Bangla OCR with Actor-Critic Reinforcement Learning & Trie Lexicon Post-Processing</p>
+        <div className="badge-sota">⚡ Visual Debugger & OCR Inspection</div>
+        <h1>Bangla <span>Handwriting OCR Inspector</span></h1>
+        <p>Inspect preprocessed character patches, confidence scores, and paragraph text</p>
       </header>
 
-      {/* Model Health Status Banner */}
       <div className="status-banner">
         <div className="status-info">
           <div className="status-dot"></div>
-          <span>Model Status: <strong>{health?.activeCheckpoint || "Online"}</strong></span>
+          <span>Model: <strong>{health?.activeCheckpoint || "connecting..."}</strong></span>
         </div>
-        <div className="status-chip">Apple Silicon Acceleration (MPS Enabled)</div>
+        <div className="status-chip">MPS GPU</div>
       </div>
 
-      {/* Main Grid */}
       <div className="main-grid">
-        {/* Input Card */}
         <div className="card">
-          <div className="card-title">✏️ Input Mode</div>
+          <div className="card-title">✏️ Input & Recognition Mode</div>
 
-          {/* Tabs */}
-          <div className="tabs-header">
+          {/* OCR Mode Selector */}
+          <div style={{ marginBottom: '16px', display: 'flex', gap: '8px' }}>
             <button
-              className={`tab-btn ${activeTab === 'canvas' ? 'active' : ''}`}
-              onClick={() => setActiveTab('canvas')}
-            >
-              Draw Canvas
+              className={`tab-btn ${ocrMode === 'document' ? 'active' : ''}`}
+              style={{ flex: 1, padding: '8px 12px', fontSize: '0.85rem' }}
+              onClick={() => { setOcrMode('document'); setPrediction(null); }}>
+              📄 Paragraph / Document OCR
             </button>
             <button
-              className={`tab-btn ${activeTab === 'upload' ? 'active' : ''}`}
-              onClick={() => setActiveTab('upload')}
-            >
-              Upload Image
-            </button>
-            <button
-              className={`tab-btn ${activeTab === 'synthetic' ? 'active' : ''}`}
-              onClick={() => setActiveTab('synthetic')}
-            >
-              Test Text
+              className={`tab-btn ${ocrMode === 'char' ? 'active' : ''}`}
+              style={{ flex: 1, padding: '8px 12px', fontSize: '0.85rem' }}
+              onClick={() => { setOcrMode('char'); setPrediction(null); }}>
+              🔤 Single Character
             </button>
           </div>
 
-          {/* Tab 1: Interactive Canvas */}
+          <div className="tabs-header">
+            <button className={`tab-btn ${activeTab === 'upload' ? 'active' : ''}`}
+              onClick={() => setActiveTab('upload')}>Upload Document</button>
+            <button className={`tab-btn ${activeTab === 'canvas' ? 'active' : ''}`}
+              onClick={() => setActiveTab('canvas')}>Draw Canvas</button>
+          </div>
+
+          {activeTab === 'upload' && (
+            <div className="canvas-wrapper">
+              <label className="dropzone" style={{ width: '100%', minHeight: '220px' }}>
+                <input type="file" accept="image/*" onChange={handleFileChange} style={{ display: 'none' }} />
+                {previewUrl
+                  ? <img src={previewUrl} alt="Preview" className="preview-image" style={{ maxHeight: '250px', objectFit: 'contain' }} />
+                  : <div style={{ textAlign: 'center' }}>
+                      <div style={{ fontSize: '2.5rem', marginBottom: '8px' }}>📄</div>
+                      <p style={{ fontWeight: 600, margin: '4px 0' }}>Drop Paragraph or Document Image</p>
+                      <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Supports JPG, PNG, scanned handwriting</span>
+                    </div>}
+              </label>
+              <button className="btn-primary" onClick={predictFile} disabled={!selectedFile || loading}>
+                {loading ? <div className="spinner"></div> : (ocrMode === 'document' ? "Recognize Paragraph" : "Recognize Character")}
+              </button>
+            </div>
+          )}
+
           {activeTab === 'canvas' && (
             <div className="canvas-wrapper">
               <div className="canvas-container">
-                <canvas
-                  ref={canvasRef}
-                  width={500}
-                  height={200}
-                  onMouseDown={startDrawing}
-                  onMouseMove={draw}
-                  onMouseUp={stopDrawing}
-                  onMouseLeave={stopDrawing}
-                  onTouchStart={startDrawing}
-                  onTouchMove={draw}
-                  onTouchEnd={stopDrawing}
-                />
+                <canvas ref={canvasRef} width={320} height={320}
+                  onMouseDown={startDrawing} onMouseMove={draw}
+                  onMouseUp={stopDrawing} onMouseLeave={stopDrawing}
+                  onTouchStart={startDrawing} onTouchMove={draw} onTouchEnd={stopDrawing} />
               </div>
               <div className="canvas-tools">
                 <div className="brush-slider">
-                  <span>Stroke Thickness:</span>
-                  <input
-                    type="range"
-                    min="2"
-                    max="14"
-                    value={brushWidth}
-                    onChange={(e) => setBrushWidth(Number(e.target.value))}
-                  />
+                  <span>Stroke:</span>
+                  <input type="range" min="2" max="20" value={brushWidth}
+                    onChange={(e) => setBrushWidth(Number(e.target.value))} />
                   <span>{brushWidth}px</span>
                 </div>
-                <button className="btn-secondary" onClick={clearCanvas}>Clear Canvas</button>
+                <button className="btn-secondary" onClick={clearCanvas}>Clear</button>
               </div>
               <button className="btn-primary" onClick={predictCanvas} disabled={loading}>
-                {loading ? <div className="spinner"></div> : "Recognize Handwriting"}
+                {loading ? <div className="spinner"></div> : "Recognize Canvas"}
               </button>
             </div>
           )}
 
-          {/* Tab 2: Upload Image File */}
-          {activeTab === 'upload' && (
-            <div className="canvas-wrapper">
-              <label className="dropzone" style={{ width: '100%' }}>
-                <input type="file" accept="image/*" onChange={handleFileChange} style={{ display: 'none' }} />
-                {previewUrl ? (
-                  <img src={previewUrl} alt="Handwriting Preview" className="preview-image" />
-                ) : (
-                  <div>
-                    <div style={{ fontSize: '2rem', marginBottom: '8px' }}>📂</div>
-                    <p>Click or Drag & Drop a handwriting image here</p>
-                  </div>
-                )}
-              </label>
-              <button className="btn-primary" onClick={predictImageFile} disabled={!selectedFile || loading}>
-                {loading ? <div className="spinner"></div> : "Recognize Uploaded Image"}
-              </button>
-            </div>
-          )}
-
-          {/* Tab 3: Test Synthetic Text String */}
-          {activeTab === 'synthetic' && (
-            <div className="canvas-wrapper">
-              <input
-                type="text"
-                className="input-text-area"
-                value={synthText}
-                onChange={(e) => setSynthText(e.target.value)}
-                placeholder="Type Bangla text (e.g. বাংলাদেশ, বিজ্ঞান)"
-              />
-              <button className="btn-primary" onClick={predictSyntheticText} disabled={!synthText || loading}>
-                {loading ? <div className="spinner"></div> : "Render & Test Recognition"}
-              </button>
-            </div>
-          )}
-
-          {error && (
-            <div style={{ marginTop: '16px', color: '#ef4444', fontSize: '0.9rem', textAlign: 'center' }}>
-              ⚠️ {error}
-            </div>
-          )}
+          {error && <div style={{ marginTop: '16px', color: '#ef4444', textAlign: 'center' }}>⚠️ {error}</div>}
         </div>
 
-        {/* Prediction Results Card */}
         <div className="card output-card">
-          <div className="card-title">🔍 HTR Prediction Results</div>
-
+          <div className="card-title">🔍 Result & Character Inspection</div>
           {prediction ? (
             <>
-              {/* Primary Result Hero */}
-              <div className="result-hero">
-                <div className="result-hero-label">Recognized Bangla Text</div>
-                <div className="result-text-main">{prediction.corrected_prediction || "—"}</div>
-                
-                <div className={`dict-badge ${prediction.is_in_dictionary ? 'valid' : 'invalid'}`}>
-                  {prediction.is_in_dictionary ? '✓ Trie Verified Bangla Word' : '⚠ Out of Vocabulary Candidate'}
+              {/* Paragraph / Multi-line Text Output */}
+              <div className="result-hero" style={{ textAlign: 'left', minHeight: '120px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                  <div className="result-hero-label">Recognized Text Output</div>
+                  {prediction.num_lines && (
+                    <span style={{ fontSize: '0.75rem', background: 'var(--accent-bg)', padding: '2px 8px', borderRadius: '12px', fontWeight: 600 }}>
+                      {prediction.num_lines} line(s) • {prediction.num_chars} characters
+                    </span>
+                  )}
+                </div>
+
+                <div style={{
+                  background: '#0d1117',
+                  color: '#38bdf8',
+                  padding: '14px 16px',
+                  borderRadius: '8px',
+                  fontFamily: 'monospace, serif',
+                  fontSize: '1.25rem',
+                  lineHeight: '1.8',
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-word',
+                  border: '1px solid #1e293b'
+                }}>
+                  {prediction.prediction || "(No text recognized)"}
                 </div>
               </div>
 
-              {/* Confidence Score Bar */}
-              <div className="confidence-meter">
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem', marginBottom: '6px', fontWeight: 600 }}>
-                  <span>Model Confidence Score</span>
-                  <span>{prediction.confidence_score}%</span>
+              {/* Single Character Preprocessed Thumbnail (if char mode) */}
+              {prediction.img_b64 && (
+                <div style={{ marginTop: '16px', display: 'flex', alignItems: 'center', gap: '16px', background: 'var(--bg-main)', padding: '12px', borderRadius: '12px' }}>
+                  <div>
+                    <div style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-muted)', marginBottom: '4px' }}>Model Input Patch (32×32)</div>
+                    <img src={prediction.img_b64} alt="Preprocessed" style={{ width: '64px', height: '64px', imageRendering: 'pixelated', border: '1px solid var(--border)', borderRadius: '6px' }} />
+                  </div>
+                  <div>
+                    <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Top Class</div>
+                    <div style={{ fontSize: '1.5rem', fontWeight: 700 }}>{prediction.prediction}</div>
+                    <div style={{ fontSize: '0.85rem', color: confColor(prediction.confidence), fontWeight: 600 }}>{prediction.confidence}% confidence</div>
+                  </div>
                 </div>
-                <div className="confidence-bar-bg">
-                  <div
-                    className="confidence-bar-fill"
-                    style={{ width: `${Math.max(prediction.confidence_score, 5)}%` }}
-                  />
-                </div>
-              </div>
+              )}
 
-              {/* Metrics Grid */}
-              <div className="metrics-row">
-                <div className="metric-box">
-                  <div className="metric-title">Raw Model Decoding</div>
-                  <div className="metric-value">{prediction.raw_prediction || "—"}</div>
+              {/* Character Inspection Grid (Visual debug view of every cropped patch) */}
+              {prediction.characters && prediction.characters.length > 0 && (
+                <div style={{ marginTop: '20px' }}>
+                  <div style={{ fontSize: '0.9rem', fontWeight: 700, marginBottom: '10px' }}>
+                    🖼️ Extracted Character Patches (Click to Inspect)
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(68px, 1fr))', gap: '8px', maxHeight: '220px', overflowY: 'auto', paddingRight: '4px' }}>
+                    {prediction.characters.map((c, i) => (
+                      <div
+                        key={i}
+                        onClick={() => setSelectedCharDetail(c)}
+                        style={{
+                          background: selectedCharDetail === c ? 'var(--accent-bg)' : 'var(--bg-main)',
+                          border: selectedCharDetail === c ? '2px solid var(--primary)' : '1px solid var(--border)',
+                          borderRadius: '8px',
+                          padding: '6px',
+                          textAlign: 'center',
+                          cursor: 'pointer',
+                          transition: 'all 0.15s ease'
+                        }}>
+                        {c.img_b64 ? (
+                          <img src={c.img_b64} alt={c.char} style={{ width: '36px', height: '36px', imageRendering: 'pixelated', borderRadius: '4px', background: '#000' }} />
+                        ) : (
+                          <div style={{ height: '36px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700 }}>␣</div>
+                        )}
+                        <div style={{ fontSize: '0.95rem', fontWeight: 700, marginTop: '2px' }}>{c.char === ' ' ? 'space' : c.char}</div>
+                        <div style={{ fontSize: '0.65rem', color: confColor(c.confidence), fontWeight: 600 }}>{c.confidence}%</div>
+                      </div>
+                    ))}
+                  </div>
                 </div>
+              )}
 
-                <div className="metric-box">
-                  <div className="metric-title">Trie Corrected Result</div>
-                  <div className="metric-value">{prediction.corrected_prediction || "—"}</div>
+              {/* Selected Character Detail Modal / Inspector Box */}
+              {selectedCharDetail && (
+                <div style={{ marginTop: '16px', background: '#0f172a', color: '#f8fafc', padding: '14px', borderRadius: '10px', border: '1px solid #334155' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                    <div style={{ fontSize: '0.85rem', fontWeight: 700, color: '#38bdf8' }}>🔍 Patch Inspector</div>
+                    <button onClick={() => setSelectedCharDetail(null)} style={{ background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer' }}>✕</button>
+                  </div>
+                  <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
+                    {selectedCharDetail.img_b64 && (
+                      <img src={selectedCharDetail.img_b64} alt="Detail" style={{ width: '56px', height: '56px', imageRendering: 'pixelated', border: '1px solid #475569', borderRadius: '6px' }} />
+                    )}
+                    <div>
+                      <div style={{ fontSize: '1.2rem', fontWeight: 700 }}>Class: <span style={{ color: '#38bdf8' }}>{selectedCharDetail.char}</span></div>
+                      <div style={{ fontSize: '0.8rem', color: '#94a3b8' }}>Line {selectedCharDetail.line + 1} • BBox: [{selectedCharDetail.bbox?.join(', ')}]</div>
+                      <div style={{ fontSize: '0.85rem', color: confColor(selectedCharDetail.confidence), fontWeight: 600 }}>Confidence: {selectedCharDetail.confidence}%</div>
+                    </div>
+                  </div>
+                  {selectedCharDetail.top5 && selectedCharDetail.top5.length > 0 && (
+                    <div style={{ marginTop: '10px', paddingTop: '8px', borderTop: '1px solid #334155' }}>
+                      <div style={{ fontSize: '0.75rem', color: '#94a3b8', marginBottom: '4px' }}>Top 5 Candidates for this patch:</div>
+                      <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                        {selectedCharDetail.top5.map((candidate, idx) => (
+                          <span key={idx} style={{ fontSize: '0.75rem', background: '#1e293b', padding: '2px 8px', borderRadius: '4px', border: '1px solid #334155' }}>
+                            {candidate.label}: {candidate.confidence}%
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
-              </div>
+              )}
             </>
           ) : (
             <div style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '60px 20px' }}>
-              <div style={{ fontSize: '2.5rem', marginBottom: '12px' }}>✨</div>
-              <p>Draw handwriting on the canvas or upload an image to view OCR predictions in real-time.</p>
+              <div style={{ fontSize: '2.5rem', marginBottom: '12px' }}>🔍</div>
+              <p>Upload a document or draw on canvas to see character patches and visual debug output.</p>
             </div>
           )}
         </div>
