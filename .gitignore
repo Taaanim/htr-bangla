@@ -1,0 +1,32 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Node Dependencies & Build Artifacts
+node_modules/
+dist/
+web_app/server/node_modules/
+web_app/client/node_modules/
+web_app/client/dist/
+
+# PyTorch Checkpoints & Weights
+checkpoints/
+*.pth
+*.pt
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Large dataset files, archives & dataset folders
+Bangla dataset/
+Bangla dataset*
+*.zip
+*.tar.gz
+*.rar
