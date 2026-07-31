@@ -21,6 +21,7 @@ from typing import List, Dict, Any, Tuple
 from model import BestCNN
 from dataset import process_character, IMG_SIZE
 from bengali_segmenter import BengaliSegmenter
+from infer import RLBanglaDecoder
 
 
 class BanglaPredictor:
@@ -30,6 +31,12 @@ class BanglaPredictor:
                  le_path: str = "checkpoints/label_encoder.pkl"):
         # Layout Segmenter
         self.segmenter = BengaliSegmenter()
+
+        # RL End-to-End Decoder
+        try:
+            self.rl_decoder = RLBanglaDecoder(cnn_weights=weights_path, le_path=le_path)
+        except Exception:
+            self.rl_decoder = None
 
         # Device
         if torch.backends.mps.is_available():

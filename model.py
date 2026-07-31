@@ -103,22 +103,62 @@ class BestCNN(nn.Module):
             nn.Dropout(0.3),
             nn.Linear(256, num_classes)
         )
+
         self._init_weights()
 
     def _init_weights(self):
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
             elif isinstance(m, nn.BatchNorm2d):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
             elif isinstance(m, nn.Linear):
-                nn.init.kaiming_normal_(m.weight)
+                nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
 
     def forward(self, x):
-        return self.classifier(self.features(x))
+        features = self.features(x)
+        return self.classifier(features)
+
+
+class CRNNFeatureExtractor(nn.Module):
+    """CRNN (CNN + BiLSTM) Visual Sequence Encoder for End-to-End Bangla HTR.
+
+    Input: (B, 3, H, W) image tensor
+    Output: (B, T, feature_dim) temporal feature matrix H = [h_1, ..., h_T]
+    """
+    def __init__(self, cnn_backbone: BestCNN, hidden_dim: int = 256, feature_dim: int = 512):
+        super().__init__()
+        # Use CNN feature maps
+        self.cnn_features = cnn_backbone.features
+        
+        # 2-layer Bidirectional LSTM
+        self.bilstm = nn.LSTM(
+            input_size=512,
+            hidden_size=hidden_dim,
+            num_layers=2,
+            batch_first=True,
+            bidirectional=True,
+            dropout=0.2
+        )
+        
+        # Linear projection to feature_dim
+        self.proj = nn.Linear(hidden_dim * 2, feature_dim)
+        self.layer_norm = nn.LayerNorm(feature_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, 3, H, W)
+        conv_out = self.cnn_features(x)  # (B, 512, H', W')
+        
+        # Column-wise average pooling along height to get width sequence
+        seq_features = conv_out.mean(dim=2)  # (B, 512, W')
+        seq_features = seq_features.permute(0, 2, 1)  # (B, W', 512)
+        
+        lstm_out, _ = self.bilstm(seq_features)  # (B, W', 2*hidden_dim)
+        projected = self.layer_norm(self.proj(lstm_out))  # (B, W', feature_dim)
+        return projected
 
     def get_features(self, x):
         """Returns 512-dim feature vector (for RL agent)."""
