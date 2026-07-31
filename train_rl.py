@@ -20,26 +20,22 @@ from torch.utils.data import DataLoader
 from model import BestCNN, CRNNFeatureExtractor
 from agent import ActorCriticAgent
 from environment import BanglaHTREnvironment, levenshtein_distance
-from dataset import BanglaDataset, process_character, IMG_SIZE
+from dataset import prepare_data, process_character, IMG_SIZE
+from synthetic_word_generator import SyntheticWordGenerator
 
 
-def train_hybrid_rl(epochs: int = 10, rl_episodes: int = 5, batch_size: int = 64, lr: float = 0.0003, ppo_epochs: int = 4, clip_eps: float = 0.2):
+def train_hybrid_rl(epochs: int = 8, rl_episodes: int = 5, batch_size: int = 64, lr: float = 0.0003, ppo_epochs: int = 4, clip_eps: float = 0.2):
     """2-Phase Hybrid Training Engine for End-to-End Bangla HTR."""
 
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
     print(f"✓ Using Device: {device}")
 
-    # Load dataset & label encoder
-    dataset_dir = "Bangla dataset/dataset_filtered"
-    if not os.path.exists(dataset_dir):
-        print(f"Error: Dataset directory {dataset_dir} not found!")
+    # Load dataset & label encoder via prepare_data
+    try:
+        train_loader, val_loader, le, num_classes = prepare_data(batch_size=batch_size)
+    except Exception as e:
+        print(f"Error loading dataset: {e}")
         return
-
-    full_ds = BanglaDataset(root_dir=dataset_dir)
-    num_classes = full_ds.num_classes
-    le = full_ds.label_encoder
-
-    train_loader = DataLoader(full_ds, batch_size=batch_size, shuffle=True, drop_last=True)
     env = BanglaHTREnvironment(label_encoder=le)
 
     # Vocabulary size = character classes + <EOS> (122) + <PAD> (123)
@@ -49,6 +45,20 @@ def train_hybrid_rl(epochs: int = 10, rl_episodes: int = 5, batch_size: int = 64
 
     # Models
     cnn_backbone = BestCNN(num_classes=num_classes)
+    weights_path = "checkpoints/best_cnn_model_weights.pth"
+    if os.path.exists(weights_path):
+        try:
+            cnn_backbone.load_state_dict(torch.load(weights_path, map_location=device, weights_only=True))
+            print(f"✓ Loaded pre-trained BestCNN weights from {weights_path}")
+        except Exception as e:
+            print(f"Warning loading weights: {e}")
+    elif os.path.exists("best_cnn_model_weights.pth"):
+        try:
+            cnn_backbone.load_state_dict(torch.load("best_cnn_model_weights.pth", map_location=device, weights_only=True))
+            print("✓ Loaded pre-trained BestCNN weights from best_cnn_model_weights.pth")
+        except Exception as e:
+            print(f"Warning loading weights: {e}")
+
     feature_extractor = CRNNFeatureExtractor(cnn_backbone=cnn_backbone).to(device)
     agent = ActorCriticAgent(vocab_size=vocab_size).to(device)
 
@@ -58,9 +68,12 @@ def train_hybrid_rl(epochs: int = 10, rl_episodes: int = 5, batch_size: int = 64
         lr=lr, weight_decay=1e-4
     )
 
-    # ── PHASE 1: Supervised Warmup ──────────────────────────────────────
+    # Synthetic Word Generator for multi-character sequence context
+    synth_gen = SyntheticWordGenerator()
+
+    # ── PHASE 1: Supervised Warmup (Single Chars + Synthetic Words) ────
     print("\n" + "="*60)
-    print("PHASE 1: Supervised Policy Warmup (CrossEntropy Pre-Training)")
+    print("PHASE 1: Supervised Policy Warmup (Single Chars + Synthetic Words)")
     print("="*60)
 
     criterion = nn.CrossEntropyLoss()
@@ -71,6 +84,7 @@ def train_hybrid_rl(epochs: int = 10, rl_episodes: int = 5, batch_size: int = 64
         start_t = time.time()
         total_loss, correct, total = 0.0, 0, 0
 
+        # 1. Single Character Batches
         for imgs, labels in train_loader:
             imgs, labels = imgs.to(device), labels.to(device)
             optimizer.zero_grad()
@@ -97,6 +111,34 @@ def train_hybrid_rl(epochs: int = 10, rl_episodes: int = 5, batch_size: int = 64
             step_loss.backward()
             optimizer.step()
             total_loss += step_loss.item()
+
+        # 2. Synthetic Word Sequence Batches
+        synth_batch_imgs = []
+        synth_batch_labels = []
+        for _ in range(batch_size):
+            w_img, w_str = synth_gen.generate_word_image()
+            proc_w = process_character(w_img, size=IMG_SIZE)
+            if proc_w is not None and len(w_str) > 0:
+                first_char_label = le.transform([w_str[0]])[0] if w_str[0] in le.classes_ else 0
+                synth_batch_imgs.append(np.transpose(proc_w.astype(np.float32)/255.0, (2, 0, 1)))
+                synth_batch_labels.append(first_char_label)
+
+        if synth_batch_imgs:
+            s_imgs = torch.tensor(np.array(synth_batch_imgs), device=device)
+            s_lbls = torch.tensor(synth_batch_labels, device=device)
+            optimizer.zero_grad()
+            s_feats = feature_extractor(s_imgs)
+            B_s, T_s, _ = s_feats.shape
+            s_hidden = agent.init_hidden(B_s, device)
+            s_prev = torch.full((B_s,), eos_idx, dtype=torch.long, device=device)
+            s_loss = 0.0
+            for t in range(min(T_s, 4)):
+                h_t = s_feats[:, t, :]
+                logits, val, s_hidden = agent(h_t, s_prev, s_hidden)
+                s_loss += criterion(logits, s_lbls)
+                s_prev = s_lbls
+            s_loss.backward()
+            optimizer.step()
 
         acc = (correct / float(total)) * 100.0 if total > 0 else 0.0
         elapsed = time.time() - start_t
