@@ -168,10 +168,12 @@ def process_character(char_img: np.ndarray, size: int = IMG_SIZE) -> Optional[np
     else:
         pil_img = Image.fromarray(char_img)
 
-    # 1. Boost Contrast by 2.0x (from banglaWrittenWordOCR)
+    # 1. Boost Contrast by 2.2x & Sharpness by 2.5x
     try:
-        enhancer = ImageEnhance.Contrast(pil_img)
-        img_enhanced = enhancer.enhance(2.0)
+        enhancer_c = ImageEnhance.Contrast(pil_img)
+        img_enhanced = enhancer_c.enhance(2.2)
+        enhancer_s = ImageEnhance.Sharpness(img_enhanced)
+        img_enhanced = enhancer_s.enhance(2.5)
     except Exception:
         img_enhanced = pil_img
 

@@ -1,25 +1,55 @@
 """
-synthetic_word_generator.py — Synthetic Bangla Word Generator for RL Sequence HTR
+synthetic_word_generator.py — Synthetic Bangla Word & Anthem Generator for RL Sequence HTR
 
-Stitches isolated character crops from dataset_filtered to form continuous synthetic Bangla words:
-1. Uses dictionary words (e.g. বাংলা, বাংলাদেশ, শিক্ষা, ঢাকা, আমাদের, কলম, পানি, মানুষ, বাড়ি)
-2. Stitches character crops horizontally with variable kerning/overlap
-3. Draws a continuous top Matra bar across character tops to mimic connected handwriting
-4. Adds random rotation, scale, and noise augmentations
+Includes full vocabulary from 'Amar Shonar Bangla' (National Anthem of Bangladesh):
+Stitches isolated character crops from dataset_filtered to form continuous synthetic Bangla words/phrases
+with realistic Kerning, Matra top bars, and overlapping modifiers.
 """
 
 import os
 import random
+import re
 import cv2
 import numpy as np
 from PIL import Image, ImageEnhance, ImageOps
 from typing import List, Tuple, Dict, Any
 
-BANGLA_WORDS_LIST = [
-    "বাংলা", "বাংলাদেশ", "শিক্ষা", "ঢাকা", "আমাদের", "কলম", "বই", "পানি", "মানুষ",
-    "বাড়ি", "স্কুল", "ছাত্র", "শিক্ষক", "নদী", "ফুল", "পাখি", "আকাশ", "বাতাস", "গাছ",
-    "ফল", "বোল", "কাজ", "মাটি", "দেশ", "ভাষা", "সোনা", "রূপা", "আলো", "ছায়া"
-]
+AMAR_SHONAR_BANGLA_TEXT = """
+আমার সোনার বাংলা আমি তোমায় ভালোবাসি
+চিরদিন তোমার আকাশ তোমার বাতাস আমার প্রাণে বাজায় বাঁশি
+ও মা ফাগুনে তোর আমের বনে ঘ্রাণে পাগল করে
+মরি হায় হায় রে
+ও মা অঘ্রানে তোর ভরা ক্ষেতে আমি কী দেখেছি মধুর হাসি
+কী শোভা কী ছায়া গো কী স্নেহ কী মায়া গো
+কী আঁচল বিছায়েছ বটের মূলে নদীর কূলে কূলে
+মা তোর মুখের বাণী আমার কানে লাগে সুধার মতো
+মরি হায় হায় রে
+মা তোর বদনখানি মলিন হলে ও মা আমি নয়নজলে ভাসি
+তোমার এই খেলাঘরে শিশুকাল কাটিলে রে
+তোমারি ধুলামাটি অঙ্গে মাখি ধন্য জীবন মানি
+তুই দিন ফুরালে সন্ধ্যাকালে কী দীপ জ্বালিস ঘরে
+মরি হায় হায় রে
+তখন খেলাধুলা সকল ফেলে ও মা তোমার কোলে ছুটে আসি
+ধেনু চরা তোমার মাঠে পারে যাবার খেয়াঘাটে
+সারা দিন পাখি ডাকা ছায়ায় ঢাকা তোমার পল্লীবাটে
+তোমার ধানে ভরা আঙিনাতে জীবনের দিন কাটে
+মরি হায় হায় রে
+ও মা আমার যে ভাই তারা সবাই ও মা তোমার রাখাল তোমার চাষি
+ও মা তোর চরণেতে দিলেম এই মাথা পেতে
+দে গো তোর পায়ের ধুলা সে যে আমার মাথার মানিক হবে
+ও মা গরিবের ধন যা আছে তাই দিব চরণতলে
+মরি হায় হায় রে
+আমি পরের ঘরে কিনব না আর মা তোর ভূষণ ব'লে গলার ফাঁসি
+"""
+
+# Extract unique words from Amar Shonar Bangla text
+def extract_words(text: str) -> List[str]:
+    cleaned = re.sub(r'[^\u0980-\u09FF\s]', ' ', text)
+    tokens = cleaned.strip().split()
+    unique_tokens = list(dict.fromkeys(tokens))
+    return [t for t in unique_tokens if len(t) >= 2]
+
+SHONAR_BANGLA_WORDS = extract_words(AMAR_SHONAR_BANGLA_TEXT)
 
 
 class SyntheticWordGenerator:
@@ -56,7 +86,7 @@ class SyntheticWordGenerator:
                             if fname.endswith(('.jpg', '.png', '.jpeg')):
                                 self.char_to_image_paths[char_name].append(os.path.join(folder_path, fname))
 
-        self.words_list = BANGLA_WORDS_LIST
+        self.words_list = SHONAR_BANGLA_WORDS
 
     def get_random_character_crop(self, char: str) -> Any:
         """Fetches a random image crop for a given Bangla character."""
@@ -83,37 +113,36 @@ class SyntheticWordGenerator:
             crop = self.get_random_character_crop(ch)
             if crop is not None:
                 h, w = crop.shape[:2]
-                target_h = 32
-                new_w = max(10, int(w * (target_h / float(h))))
-                crop_resized = cv2.resize(crop, (new_w, target_h))
+                target_h = 64
+                new_w = max(20, int(w * (target_h / float(h))))
+                crop_resized = cv2.resize(crop, (new_w, target_h), interpolation=cv2.INTER_CUBIC)
                 char_crops.append(crop_resized)
                 valid_chars.append(ch)
 
         if not char_crops:
-            canvas = np.zeros((32, 64, 3), dtype=np.uint8)
+            canvas = np.zeros((64, 128, 3), dtype=np.uint8)
             return canvas, "ক"
 
-        total_w = sum(c.shape[1] for c in char_crops) + random.randint(4, 12)
-        canvas = np.zeros((32, total_w, 3), dtype=np.uint8)
+        total_w = sum(c.shape[1] for c in char_crops) + random.randint(8, 20)
+        canvas = np.zeros((64, total_w, 3), dtype=np.uint8)
 
-        curr_x = random.randint(0, 4)
+        curr_x = random.randint(0, 8)
         for crop in char_crops:
             h, w = crop.shape[:2]
             if curr_x + w > total_w:
                 w = total_w - curr_x
                 crop = crop[:, :w]
             canvas[:, curr_x:curr_x+w] = crop
-            curr_x += (w - random.randint(0, 3))
+            curr_x += (w - random.randint(0, 5))
 
-        # Add top Matra horizontal bar across character tops to mimic connected handwriting
-        matra_y = random.randint(4, 7)
-        cv2.line(canvas, (4, matra_y), (max(4, curr_x - 4), matra_y), (255, 255, 255), thickness=random.randint(1, 2))
-
+        # Character crops already contain their natural Matras, no extra line needed
         target_word = "".join(valid_chars)
         return canvas, target_word
 
 
 if __name__ == "__main__":
     gen = SyntheticWordGenerator()
-    img, text = gen.generate_word_image("বাংলা")
+    print(f"Loaded {len(gen.words_list)} unique words from Amar Shonar Bangla!")
+    sample_word = "ভালোবাসি"
+    img, text = gen.generate_word_image(sample_word)
     print(f"Generated synthetic word: '{text}' | Image shape: {img.shape}")

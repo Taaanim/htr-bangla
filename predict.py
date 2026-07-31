@@ -105,13 +105,156 @@ class BanglaPredictor:
             "top5": top5
         }
 
+    @staticmethod
+    def _extract_exact_ink_bbox(img: np.ndarray, margin: int = 6) -> Tuple[int, int, int, int]:
+        """Extracts exact bounding box around all drawn ink on photo/canvas using Gaussian Blur + Otsu Binarization."""
+        if img is None or img.size == 0:
+            return 0, 0, 0, 0
+
+        if len(img.shape) == 3:
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = img.copy()
+
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        is_white_bg = gray.mean() > 127
+
+        if is_white_bg:
+            _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        else:
+            _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
+
+        coords = np.argwhere(thresh > 0)
+        if coords.size == 0:
+            return 0, 0, img.shape[1], img.shape[0]
+
+        y1, x1 = coords.min(axis=0)
+        y2, x2 = coords.max(axis=0)
+
+        h_img, w_img = img.shape[:2]
+        x1 = max(0, x1 - margin)
+        y1 = max(0, y1 - margin)
+        x2 = min(w_img, x2 + margin)
+        y2 = min(h_img, y2 + margin)
+
+        return int(x1), int(y1), int(x2 - x1), int(y2 - y1)
+
     def predict_file(self, image_path: str) -> dict:
-        """Predict from an image file path."""
+        """Predict from an image file path with exact ink cropping & adaptive character/word layout analysis."""
         img = cv2.imread(image_path)
         if img is None:
             return {"error": f"Could not read image: {image_path}"}
 
-        processed = process_character(img, size=IMG_SIZE)
+        x1, y1, w, h = self._extract_exact_ink_bbox(img)
+        ink_crop = img[y1:y1+h, x1:x1+w] if (w > 0 and h > 0) else img
+        aspect = w / float(h) if h > 0 else 1.0
+
+    def predict_file(self, image_path: str) -> dict:
+        """Predict from an image file path with exact ink cropping & adaptive character/word layout analysis."""
+        img = cv2.imread(image_path)
+        if img is None:
+            return {"error": f"Could not read image: {image_path}"}
+
+        x1, y1, w, h = self._extract_exact_ink_bbox(img)
+        ink_crop = img[y1:y1+h, x1:x1+w] if (w > 0 and h > 0) else img
+        aspect = w / float(h) if h > 0 else 1.0
+
+        # If multi-character word (aspect > 1.25), perform Matra-aware character segmentation on exact ink crop
+        if aspect > 1.25:
+            gray = cv2.cvtColor(ink_crop, cv2.COLOR_BGR2GRAY) if len(ink_crop.shape) == 3 else ink_crop.copy()
+            is_white_bg = gray.mean() > 127
+            binary = cv2.threshold(gray, 200 if is_white_bg else 50, 255, cv2.THRESH_BINARY_INV if is_white_bg else cv2.THRESH_BINARY)[1]
+
+            h_c, w_c = binary.shape
+            search_region = binary[int(h_c*0.08):int(h_c*0.35), :]
+            row_sums = search_region.sum(axis=1)
+
+            if row_sums.size > 0 and row_sums.max() > 0:
+                matra_rel_y = np.argmax(row_sums)
+                matra_y = int(h_c*0.08) + matra_rel_y
+                no_matra = binary.copy()
+                no_matra[max(0, matra_y-3):min(h_c, matra_y+4), :] = 0
+            else:
+                no_matra = binary
+
+            contours, _ = cv2.findContours(no_matra, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            char_boxes = []
+            for c in contours:
+                bx, by, bw, bh = cv2.boundingRect(c)
+                if bw >= 3 and bh >= 5 and (bw * bh) >= 15:
+                    char_boxes.append((bx, by, bw, bh))
+
+            char_boxes = sorted(char_boxes, key=lambda b: b[0])
+
+            merged_boxes = []
+            for b in char_boxes:
+                if not merged_boxes:
+                    merged_boxes.append(b)
+                else:
+                    px, py, pw, ph = merged_boxes[-1]
+                    cx, cy, cw, ch = b
+                    if cx < (px + pw - 2):
+                        nx = px
+                        ny = min(py, cy)
+                        nw = max(px + pw, cx + cw) - nx
+                        nh = max(py + ph, cy + ch) - ny
+                        merged_boxes[-1] = (nx, ny, nw, nh)
+                    else:
+                        merged_boxes.append(b)
+
+            if merged_boxes:
+                word_chars = []
+                word_confs = []
+                symbol_objs = []
+                pad = 2
+
+                for bx, by, bw, bh in merged_boxes:
+                    crop_y1 = max(0, by - pad)
+                    crop_y2 = min(ink_crop.shape[0], by + bh + pad)
+                    crop_x1 = max(0, bx - pad)
+                    crop_x2 = min(ink_crop.shape[1], bx + bw + pad)
+                    char_crop = ink_crop[crop_y1:crop_y2, crop_x1:crop_x2]
+
+                    proc_c = process_character(char_crop, size=IMG_SIZE)
+                    if proc_c is None:
+                        continue
+
+                    res = self.predict_image(proc_c)
+                    char_pred = res["prediction"]
+                    char_conf = res["confidence"]
+
+                    _, buffer = cv2.imencode('.png', cv2.cvtColor(proc_c, cv2.COLOR_RGB2BGR))
+                    img_b64 = "data:image/png;base64," + base64.b64encode(buffer).decode('utf-8')
+
+                    sym_bbox = [int(x1 + bx), int(y1 + by), int(bw), int(bh)]
+                    symbol_objs.append({
+                        "symbol": char_pred,
+                        "confidence": char_conf,
+                        "bbox": sym_bbox,
+                        "corner_points": self._get_corners(sym_bbox),
+                        "img_b64": img_b64,
+                        "top5": res.get("top5", [])
+                    })
+                    word_chars.append(char_pred)
+                    word_confs.append(char_conf)
+
+                if word_chars:
+                    final_text = "".join(word_chars)
+                    avg_conf = round(float(np.mean(word_confs)), 2)
+                    _, buffer = cv2.imencode('.png', ink_crop)
+                    img_b64_full = "data:image/png;base64," + base64.b64encode(buffer).decode('utf-8')
+                    return {
+                        "prediction": final_text,
+                        "confidence": avg_conf,
+                        "img_b64": img_b64_full,
+                        "symbols": symbol_objs
+                    }
+
+        # Single character classification fallback
+        processed = process_character(ink_crop, size=IMG_SIZE)
         if processed is None:
             return {"error": "No character found in image"}
 
@@ -196,12 +339,43 @@ class BanglaPredictor:
 
         h_img, w_img = img.shape[:2]
 
-        seg_res = self.segmenter.segment_image(img)
-        rotation_angle = seg_res.get("rotation", 0.0)
+        # First run predict_file word layout analysis
+        file_res = self.predict_file(image_path)
+        if file_res and "error" not in file_res and file_res.get("prediction"):
+            symbols = file_res.get("symbols", [])
+            pred_text = file_res.get("prediction", "")
+            conf = file_res.get("confidence", 90.0)
+            img_b64 = file_res.get("img_b64", "")
 
-        chars_meta = seg_res.get("characters", [])
-        if not chars_meta:
-            return {"prediction": "", "blocks": [], "lines": [], "words": [], "characters": []}
+            block_bbox = [0, 0, w_img, h_img]
+            block_corners = self._get_corners(block_bbox)
+
+            if symbols:
+                formatted_symbols = symbols
+            else:
+                formatted_symbols = [{
+                    "symbol": pred_text,
+                    "confidence": conf,
+                    "bbox": block_bbox,
+                    "corner_points": block_corners,
+                    "line": 0,
+                    "img_b64": img_b64,
+                    "top5": file_res.get("top5", [])
+                }]
+
+            return {
+                "prediction": pred_text,
+                "confidence": conf,
+                "rotation": 0.0,
+                "blocks": [{"block_type": "Text", "text": pred_text, "confidence": conf, "bbox": block_bbox, "corner_points": block_corners, "rotation": 0.0}],
+                "lines": [{"text": pred_text, "confidence": conf, "bbox": block_bbox, "corner_points": block_corners, "line": 0}],
+                "words": [{"text": pred_text, "confidence": conf, "bbox": block_bbox, "corner_points": block_corners, "line": 0}],
+                "characters": formatted_symbols,
+                "num_chars": len(formatted_symbols),
+                "num_lines": 1,
+                "num_words": 1,
+                "img_b64": img_b64
+            }
 
         line_indices = sorted(list(set(c["line"] for c in chars_meta)))
 
@@ -241,85 +415,67 @@ class BanglaPredictor:
                 wy1 = min(c["primary_bbox"][1] for c in w_items)
                 wx2 = max(c["primary_bbox"][0] + c["primary_bbox"][2] for c in w_items)
                 wy2 = max(c["primary_bbox"][1] + c["primary_bbox"][3] for c in w_items)
+
+                pad = 4
+                crop_y1 = max(0, wy1 - pad)
+                crop_y2 = min(h_img, wy2 + pad)
+                crop_x1 = max(0, wx1 - pad)
+                crop_x2 = min(w_img, wx2 + pad)
+
+                word_crop = img[crop_y1:crop_y2, crop_x1:crop_x2]
                 word_bbox = [int(wx1), int(wy1), int(wx2 - wx1), int(wy2 - wy1)]
                 word_corners = self._get_corners(word_bbox)
 
-                word_chars = []
-                word_confs = []
+                word_text_str = ""
+                word_avg_conf = 0.0
+                symbol_objs = []
 
-                for item in w_items:
-                    px, py, pw, ph = item["primary_bbox"]
-                    pad = 3
-                    crop_y1 = max(0, py - pad)
-                    crop_y2 = min(h_img, py + ph + pad)
-                    crop_x1 = max(0, px - pad)
-                    crop_x2 = min(w_img, px + pw + pad)
-                    primary_crop = img[crop_y1:crop_y2, crop_x1:crop_x2]
+                # 1. Try RL End-to-End Sequence Decoder on intact word crop
+                if self.rl_decoder is not None and word_crop.size > 0:
+                    try:
+                        rl_res = self.rl_decoder.decode_image_sequence(word_crop)
+                        if rl_res.get("prediction"):
+                            word_text_str = rl_res["prediction"]
+                            word_avg_conf = rl_res.get("confidence", 0.0)
+                            tokens = rl_res.get("tokens", [])
+                            token_confs = rl_res.get("token_confidences", [])
+                            w_sub = max(1, (wx2 - wx1) // max(1, len(tokens)))
 
-                    p_processed = process_character(primary_crop, size=IMG_SIZE)
-                    if p_processed is None:
-                        continue
+                            for t_idx, token in enumerate(tokens):
+                                sx = wx1 + t_idx * w_sub
+                                sym_bbox = [int(sx), int(wy1), int(w_sub), int(wy2 - wy1)]
+                                symbol_objs.append({
+                                    "symbol": token,
+                                    "confidence": token_confs[t_idx] if t_idx < len(token_confs) else word_avg_conf,
+                                    "bbox": sym_bbox,
+                                    "corner_points": self._get_corners(sym_bbox),
+                                    "line": int(line_idx)
+                                })
+                    except Exception as e:
+                        print(f"RL Word decode fallback: {e}")
 
-                    p_result = self.predict_image(p_processed)
-                    primary_pred = p_result["prediction"]
-                    primary_conf = p_result["confidence"]
+                # 2. Fallback to Sliding-Window Sequence Recognizer
+                if not word_text_str and word_crop.size > 0:
+                    word_text_str, word_avg_conf, symbol_objs = self.predict_word_sliding_window(word_crop)
 
-                    aspect = pw / float(ph) if ph > 0 else 1.0
-                    if primary_conf >= 50.0 or aspect < 1.35 or len(item["secondary_bboxes"]) <= 1:
-                        final_boxes_to_use = [(px, py, pw, ph, primary_pred, primary_conf, p_result)]
-                    else:
-                        sec_evals = []
-                        for sx, sy, sw, sh in item["secondary_bboxes"]:
-                            scrop_y1 = max(0, sy - pad)
-                            scrop_y2 = min(h_img, sy + sh + pad)
-                            scrop_x1 = max(0, sx - pad)
-                            scrop_x2 = min(w_img, sx + sw + pad)
-                            sec_crop = img[scrop_y1:scrop_y2, scrop_x1:scrop_x2]
-
-                            s_proc = process_character(sec_crop, size=IMG_SIZE)
-                            if s_proc is None:
-                                continue
-                            s_res = self.predict_image(s_proc)
-                            sec_evals.append((sx, sy, sw, sh, s_res["prediction"], s_res["confidence"], s_res))
-
-                        if sec_evals:
-                            final_boxes_to_use = sec_evals
-                        else:
-                            final_boxes_to_use = [(px, py, pw, ph, primary_pred, primary_conf, p_result)]
-
-                    for cx, cy, cw, ch, char_pred, char_conf, result in final_boxes_to_use:
-                        crop_y1 = max(0, cy - pad)
-                        crop_y2 = min(h_img, cy + ch + pad)
-                        crop_x1 = max(0, cx - pad)
-                        crop_x2 = min(w_img, cx + cw + pad)
-                        c_crop = img[crop_y1:crop_y2, crop_x1:crop_x2]
-                        proc_c = process_character(c_crop, size=IMG_SIZE)
-
-                        if proc_c is None:
+                # 3. Fallback to individual character predictions if sequence decoders return empty
+                if not word_text_str:
+                    word_chars = []
+                    word_confs = []
+                    for item in w_items:
+                        px, py, pw, ph = item["primary_bbox"]
+                        primary_crop = img[max(0, py - pad):min(h_img, py + ph + pad),
+                                           max(0, px - pad):min(w_img, px + pw + pad)]
+                        p_processed = process_character(primary_crop, size=IMG_SIZE)
+                        if p_processed is None:
                             continue
+                        p_result = self.predict_image(p_processed)
+                        word_chars.append(p_result["prediction"])
+                        word_confs.append(p_result["confidence"])
+                    word_text_str = "".join(word_chars)
+                    word_avg_conf = round(float(np.mean(word_confs)), 2) if word_confs else 0.0
 
-                        _, buffer = cv2.imencode('.png', cv2.cvtColor(proc_c, cv2.COLOR_RGB2BGR))
-                        img_b64 = "data:image/png;base64," + base64.b64encode(buffer).decode('utf-8')
-
-                        sym_bbox = [int(cx), int(cy), int(cw), int(ch)]
-                        sym_corners = self._get_corners(sym_bbox)
-
-                        symbol_obj = {
-                            "symbol": char_pred,
-                            "confidence": char_conf,
-                            "bbox": sym_bbox,
-                            "corner_points": sym_corners,
-                            "line": int(line_idx),
-                            "img_b64": img_b64,
-                            "top5": result.get("top5", [])
-                        }
-                        all_symbols.append(symbol_obj)
-                        word_chars.append(char_pred)
-                        word_confs.append(char_conf)
-
-                word_text_str = "".join(word_chars)
-                word_avg_conf = round(float(np.mean(word_confs)), 2) if word_confs else 0.0
-
+                all_symbols.extend(symbol_objs)
                 structured_words.append({
                     "text": word_text_str,
                     "confidence": word_avg_conf,
@@ -329,7 +485,7 @@ class BanglaPredictor:
                 })
 
                 line_word_strs.append(word_text_str)
-                line_confs.extend(word_confs)
+                line_confs.append(word_avg_conf)
 
             lx1 = min(c["primary_bbox"][0] for c in line_items)
             ly1 = min(c["primary_bbox"][1] for c in line_items)

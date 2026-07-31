@@ -21,7 +21,7 @@ from model import BestCNN, CRNNFeatureExtractor
 from agent import ActorCriticAgent
 from environment import BanglaHTREnvironment, levenshtein_distance
 from dataset import prepare_data, process_character, IMG_SIZE
-from synthetic_word_generator import SyntheticWordGenerator
+from synthetic_word_generator import SyntheticWordGenerator, extract_words
 
 
 def train_hybrid_rl(epochs: int = 8, rl_episodes: int = 5, batch_size: int = 64, lr: float = 0.0003, ppo_epochs: int = 4, clip_eps: float = 0.2):
@@ -112,32 +112,53 @@ def train_hybrid_rl(epochs: int = 8, rl_episodes: int = 5, batch_size: int = 64,
             optimizer.step()
             total_loss += step_loss.item()
 
-        # 2. Synthetic Word Sequence Batches
+        # 2. Synthetic Word Sequence Batches with CTCLoss
+        ctc_loss_fn = nn.CTCLoss(blank=eos_idx, zero_infinity=True)
         synth_batch_imgs = []
-        synth_batch_labels = []
+        synth_targets = []
+        target_lengths = []
+
         for _ in range(batch_size):
             w_img, w_str = synth_gen.generate_word_image()
             proc_w = process_character(w_img, size=IMG_SIZE)
             if proc_w is not None and len(w_str) > 0:
-                first_char_label = le.transform([w_str[0]])[0] if w_str[0] in le.classes_ else 0
-                synth_batch_imgs.append(np.transpose(proc_w.astype(np.float32)/255.0, (2, 0, 1)))
-                synth_batch_labels.append(first_char_label)
+                t_seq = [le.transform([ch])[0] for ch in w_str if ch in le.classes_]
+                if t_seq:
+                    synth_batch_imgs.append(np.transpose(proc_w.astype(np.float32)/255.0, (2, 0, 1)))
+                    synth_targets.extend(t_seq)
+                    target_lengths.append(len(t_seq))
 
-        if synth_batch_imgs:
+        if synth_batch_imgs and target_lengths:
             s_imgs = torch.tensor(np.array(synth_batch_imgs), device=device)
-            s_lbls = torch.tensor(synth_batch_labels, device=device)
+            targets_tensor = torch.tensor(synth_targets, dtype=torch.long, device=device)
+            target_lens_tensor = torch.tensor(target_lengths, dtype=torch.long, device=device)
+
             optimizer.zero_grad()
-            s_feats = feature_extractor(s_imgs)
+            s_feats = feature_extractor(s_imgs)  # (B, T, feature_dim)
             B_s, T_s, _ = s_feats.shape
+
+            # Compute logits across full sequence length
             s_hidden = agent.init_hidden(B_s, device)
             s_prev = torch.full((B_s,), eos_idx, dtype=torch.long, device=device)
-            s_loss = 0.0
-            for t in range(min(T_s, 4)):
+
+            logits_list = []
+            for t in range(T_s):
                 h_t = s_feats[:, t, :]
                 logits, val, s_hidden = agent(h_t, s_prev, s_hidden)
-                s_loss += criterion(logits, s_lbls)
-                s_prev = s_lbls
-            s_loss.backward()
+                logits_list.append(logits.unsqueeze(1))
+                s_prev = torch.argmax(logits, dim=-1)
+
+            seq_logits = torch.cat(logits_list, dim=1)  # (B, T_s, vocab_size)
+            log_probs_ctc = F.log_softmax(seq_logits, dim=-1).permute(1, 0, 2)  # (T_s, B, vocab_size)
+            input_lens_tensor = torch.full((B_s,), T_s, dtype=torch.long, device=device)
+
+            word_ctc_loss = ctc_loss_fn(
+                log_probs_ctc.cpu(),
+                targets_tensor.cpu(),
+                input_lens_tensor.cpu(),
+                target_lens_tensor.cpu()
+            ).to(device)
+            word_ctc_loss.backward()
             optimizer.step()
 
         acc = (correct / float(total)) * 100.0 if total > 0 else 0.0
@@ -230,6 +251,16 @@ if __name__ == "__main__":
     parser.add_argument("--rl-episodes", type=int, default=3, help="PPO RL episodes")
     parser.add_argument("--batch-size", type=int, default=64, help="Batch size")
     parser.add_argument("--lr", type=float, default=0.0003, help="Learning rate")
+    parser.add_argument("--text-file", type=str, default="", help="Path to custom text file for synthetic word generator")
     args = parser.parse_args()
+
+    if args.text_file and os.path.exists(args.text_file):
+        with open(args.text_file, "r", encoding="utf-8") as f:
+            custom_txt = f.read()
+        custom_words = extract_words(custom_txt)
+        if custom_words:
+            print(f"✓ Loaded {len(custom_words)} custom synthetic training words from {args.text_file}")
+            synth_gen = SyntheticWordGenerator()
+            synth_gen.words_list = custom_words
 
     train_hybrid_rl(epochs=args.epochs, rl_episodes=args.rl_episodes, batch_size=args.batch_size, lr=args.lr)

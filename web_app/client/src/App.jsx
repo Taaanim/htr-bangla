@@ -2,10 +2,12 @@ import React, { useState, useRef, useEffect } from 'react';
 import './index.css';
 
 const API_BASE = 'http://localhost:5001/api';
+const confColor = (c) => (c >= 90 ? '#10b981' : c >= 70 ? '#f59e0b' : '#ef4444');
+const roundAcc = (val) => (isNaN(val) ? 0 : Math.round(val));
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('upload'); // 'upload' or 'canvas'
-  const [ocrMode, setOcrMode] = useState('document');   // 'document' or 'char'
+  const [ocrMode, setOcrMode] = useState('char');       // 'char' or 'document'
   const [health, setHealth] = useState(null);
   const [loading, setLoading] = useState(false);
   const [prediction, setPrediction] = useState(null);
@@ -83,8 +85,57 @@ export default function App() {
     setPrediction(null); setError(null); setSelectedCharDetail(null);
   };
 
+  const getCroppedCanvas = (canvas) => {
+    if (!canvas) return canvas;
+    const ctx = canvas.getContext('2d');
+    const width = canvas.width;
+    const height = canvas.height;
+    const imgData = ctx.getImageData(0, 0, width, height);
+    const data = imgData.data;
+
+    let minX = width, minY = height, maxX = 0, maxY = 0;
+    let found = false;
+
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const i = (y * width + x) * 4;
+        const r = data[i], g = data[i + 1], b = data[i + 2];
+        if (r < 240 || g < 240 || b < 240) {
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+          found = true;
+        }
+      }
+    }
+
+    if (!found) return canvas;
+
+    const pad = 6;
+    minX = Math.max(0, minX - pad);
+    minY = Math.max(0, minY - pad);
+    maxX = Math.min(width, maxX + pad);
+    maxY = Math.min(height, maxY + pad);
+
+    const cropW = maxX - minX;
+    const cropH = maxY - minY;
+
+    const croppedCanvas = document.createElement('canvas');
+    croppedCanvas.width = cropW;
+    croppedCanvas.height = cropH;
+    const croppedCtx = croppedCanvas.getContext('2d');
+    croppedCtx.fillStyle = '#ffffff';
+    croppedCtx.fillRect(0, 0, cropW, cropH);
+    croppedCtx.drawImage(canvas, minX, minY, cropW, cropH, 0, 0, cropW, cropH);
+
+    return croppedCanvas;
+  };
+
   const predictCanvas = async () => {
-    const imageBase64 = canvasRef.current.toDataURL('image/png');
+    if (!canvasRef.current) return;
+    const croppedCanvas = getCroppedCanvas(canvasRef.current);
+    const imageBase64 = croppedCanvas.toDataURL('image/png');
     setLoading(true); setError(null); setSelectedCharDetail(null);
     try {
       const res = await fetch(`${API_BASE}/predict/image`, {
@@ -123,7 +174,31 @@ export default function App() {
     finally { setLoading(false); }
   };
 
-  const confColor = (c) => c >= 90 ? '#10b981' : c >= 70 ? '#f59e0b' : '#ef4444';
+  const [syntheticText, setSyntheticText] = useState('আমার সোনার বাংলা, আমি তোমায় ভালোবাসি।\nচিরদিন তোমার আকাশ, তোমার বাতাস, আমার প্রাণে বাজায় বাঁশি॥');
+  const [isPredictingSynth, setIsPredictingSynth] = useState(false);
+  const [synthResults, setSynthResults] = useState(null);
+
+  const predictSyntheticText = async () => {
+    if (!syntheticText || !syntheticText.trim()) return;
+    setIsPredictingSynth(true); setSynthResults(null); setError(null);
+    try {
+      const res = await fetch(`${API_BASE}/predict/synthetic_text`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: syntheticText })
+      });
+      const data = await res.json();
+      if (data.success) {
+        setSynthResults(data.results);
+      } else {
+        setError(data.error || "Synthetic text prediction failed");
+      }
+    } catch {
+      setError("Cannot connect to API server on localhost:5001");
+    } finally {
+      setIsPredictingSynth(false);
+    }
+  };
 
   return (
     <div className="app-container">
@@ -166,7 +241,43 @@ export default function App() {
               onClick={() => setActiveTab('upload')}>Upload Document</button>
             <button className={`tab-btn ${activeTab === 'canvas' ? 'active' : ''}`}
               onClick={() => setActiveTab('canvas')}>Draw Canvas</button>
+            <button className={`tab-btn ${activeTab === 'synthetic' ? 'active' : ''}`}
+              onClick={() => setActiveTab('synthetic')}>📝 Predict Synthetic Text</button>
           </div>
+
+          {activeTab === 'synthetic' && (
+            <div className="canvas-wrapper" style={{ marginTop: '12px' }}>
+              <div style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-muted)', marginBottom: '6px' }}>
+                Paste or type custom Bangla text to generate synthetic handwriting & evaluate trained model:
+              </div>
+              <textarea
+                value={syntheticText}
+                onChange={(e) => setSyntheticText(e.target.value)}
+                placeholder="বাংলা টেক্সট লিখুন বা পেস্ট করুন (যেমন: আমার সোনার বাংলা...)"
+                rows={5}
+                style={{
+                  width: '100%',
+                  background: '#0d1117',
+                  color: '#38bdf8',
+                  border: '1px solid #1e293b',
+                  borderRadius: '8px',
+                  padding: '12px',
+                  fontFamily: 'monospace, serif',
+                  fontSize: '1rem',
+                  lineHeight: '1.6',
+                  resize: 'vertical',
+                  boxSizing: 'border-box'
+                }}
+              />
+              <button
+                className="btn-primary"
+                onClick={predictSyntheticText}
+                disabled={isPredictingSynth || !syntheticText.trim()}
+                style={{ marginTop: '12px', width: '100%' }}>
+                {isPredictingSynth ? <div className="spinner"></div> : "🔍 Predict Custom Text With Trained Model"}
+              </button>
+            </div>
+          )}
 
           {activeTab === 'upload' && (
             <div className="canvas-wrapper">
@@ -213,8 +324,53 @@ export default function App() {
         </div>
 
         <div className="card output-card">
-          <div className="card-title">🔍 Recognized Output & Hierarchy</div>
-          {prediction ? (
+          <div className="card-title">🔍 Recognized Output & Benchmark Results</div>
+          
+          {synthResults ? (
+            <div>
+              <div style={{ display: 'flex', gap: '8px', marginBottom: '14px' }}>
+                <span style={{ fontSize: '0.8rem', background: 'rgba(16, 185, 129, 0.15)', color: '#10b981', padding: '4px 10px', borderRadius: '6px', border: '1px solid #10b981', fontWeight: 700 }}>
+                  Exact Matches: {synthResults.filter(r => r.match).length} / {synthResults.length}
+                </span>
+                <span style={{ fontSize: '0.8rem', background: 'rgba(59, 130, 246, 0.15)', color: '#3b82f6', padding: '4px 10px', borderRadius: '6px', border: '1px solid #3b82f6', fontWeight: 700 }}>
+                  Sequence Accuracy: {roundAcc((synthResults.filter(r => r.match).length / synthResults.length) * 100)}%
+                </span>
+              </div>
+
+              <div style={{ maxHeight: '420px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '10px', paddingRight: '4px' }}>
+                {synthResults.map((r, idx) => (
+                  <div key={idx} style={{
+                    background: 'var(--bg-main)',
+                    border: r.match ? '1.5px solid #10b981' : '1.5px solid #ef4444',
+                    borderRadius: '10px',
+                    padding: '10px 14px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    boxShadow: r.match ? '0 2px 8px rgba(16,185,129,0.1)' : '0 2px 8px rgba(239,68,68,0.1)'
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
+                      {r.img_b64 ? (
+                        <img src={r.img_b64} alt={r.gt} style={{ height: '52px', minWidth: '60px', objectFit: 'contain', borderRadius: '6px', background: '#000', border: '1.5px solid #38bdf8', imageRendering: 'crisp-edges' }} />
+                      ) : (
+                        <div style={{ height: '52px', width: '60px', background: '#000', borderRadius: '6px' }}></div>
+                      )}
+                      <div>
+                        <div style={{ fontSize: '0.8rem', color: '#94a3b8' }}>Target: <strong style={{ color: '#38bdf8', fontSize: '1.05rem', fontWeight: 700 }}>{r.gt}</strong></div>
+                        <div style={{ fontSize: '1.25rem', fontWeight: 700, color: r.match ? '#10b981' : '#f87171', marginTop: '2px' }}>{r.prediction || '(no pred)'}</div>
+                      </div>
+                    </div>
+                    <div style={{ textAlign: 'right' }}>
+                      <div style={{ fontSize: '0.85rem', color: r.match ? '#10b981' : '#ef4444', fontWeight: 700 }}>
+                        {r.match ? "✓ Match" : "✕ Diff"}
+                      </div>
+                      <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '2px' }}>{r.confidence}%</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : prediction ? (
             <>
               {/* Hierarchical Document Layout Badges */}
               {prediction.blocks && (
@@ -257,21 +413,52 @@ export default function App() {
                   wordBreak: 'break-word',
                   border: '1px solid #1e293b'
                 }}>
-                  {prediction.prediction || "(No text recognized)"}
+                  {typeof prediction === 'string'
+                    ? prediction
+                    : (typeof prediction?.prediction === 'string'
+                        ? prediction.prediction
+                        : (typeof prediction?.prediction?.prediction === 'string'
+                            ? prediction.prediction.prediction
+                            : JSON.stringify(prediction?.prediction || "(No text recognized)")))}
                 </div>
               </div>
 
-              {/* Single Character Preprocessed Thumbnail (if char mode) */}
+              {/* Model Input Image Preview Card */}
               {prediction.img_b64 && (
-                <div style={{ marginTop: '16px', display: 'flex', alignItems: 'center', gap: '16px', background: 'var(--bg-main)', padding: '12px', borderRadius: '12px' }}>
+                <div style={{
+                  marginBottom: '16px',
+                  background: '#0d1117',
+                  border: '1.5px solid #38bdf8',
+                  borderRadius: '10px',
+                  padding: '12px 16px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '16px',
+                  boxShadow: '0 4px 12px rgba(56, 189, 248, 0.15)'
+                }}>
+                  <img
+                    src={prediction.img_b64}
+                    alt="Model Input Patch Preview"
+                    style={{
+                      height: '64px',
+                      width: '64px',
+                      objectFit: 'contain',
+                      borderRadius: '8px',
+                      background: '#000',
+                      border: '1px solid #38bdf8',
+                      imageRendering: 'crisp-edges'
+                    }}
+                  />
                   <div>
-                    <div style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-muted)', marginBottom: '4px' }}>Model Input Patch (32×32)</div>
-                    <img src={prediction.img_b64} alt="Preprocessed" style={{ width: '64px', height: '64px', imageRendering: 'pixelated', border: '1px solid var(--border)', borderRadius: '6px' }} />
-                  </div>
-                  <div>
-                    <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Top Class</div>
-                    <div style={{ fontSize: '1.5rem', fontWeight: 700 }}>{prediction.prediction}</div>
-                    <div style={{ fontSize: '0.85rem', color: confColor(prediction.confidence), fontWeight: 600 }}>{prediction.confidence}% confidence</div>
+                    <div style={{ fontSize: '0.75rem', fontWeight: 700, color: '#38bdf8', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                      🖼️ Model Input Image Patch (32×32 Preprocessed Tensor)
+                    </div>
+                    <div style={{ fontSize: '1.4rem', fontWeight: 800, color: '#ffffff', marginTop: '2px' }}>
+                      {typeof prediction.prediction === 'string' ? prediction.prediction : (typeof prediction === 'string' ? prediction : '')}
+                    </div>
+                    <div style={{ fontSize: '0.85rem', color: confColor(prediction.confidence), fontWeight: 700 }}>
+                      {prediction.confidence}% Confidence
+                    </div>
                   </div>
                 </div>
               )}

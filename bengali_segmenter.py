@@ -138,52 +138,65 @@ class HierarchicalSegmenter:
         h_img, w_img = thresh_img.shape[:2]
 
         # 1. Primary Contours (Intact Macro Characters)
-        p_contours, _ = cv2.findContours(thresh_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if not p_contours:
+        contours, _ = cv2.findContours(thresh_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
             return []
 
-        raw_p_boxes = []
-        for c in p_contours:
+        final_primary_boxes = []
+        for c in contours:
             x, y, w, h = cv2.boundingRect(c)
-            # Strict noise filter for primary boxes: w>=5, h>=8, area>=45
-            if w >= 5 and h >= 8 and w * h >= 45:
-                raw_p_boxes.append((x, y, w, h))
+            if w >= 4 and h >= 8 and (w * h) >= 30:
+                aspect = w / float(h)
+                if aspect > 1.25:
+                    # Multi-character connected word contour — disconnect top Matra bar
+                    word_mask = thresh_img[y:y+h, x:x+w].copy()
+                    search_region = word_mask[int(h * 0.08):int(h * 0.35), :]
+                    row_sums = search_region.sum(axis=1)
 
-        if not raw_p_boxes:
+                    if row_sums.size > 0 and row_sums.max() > 0:
+                        matra_y = int(h * 0.08) + np.argmax(row_sums)
+                        word_mask[max(0, matra_y - 2):min(h, matra_y + 3), :] = 0
+
+                    sub_contours, _ = cv2.findContours(word_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    sub_boxes = []
+                    for sc in sub_contours:
+                        sx, sy, sw, sh = cv2.boundingRect(sc)
+                        if sw >= 4 and sh >= 6 and (sw * sh) >= 20:
+                            sub_boxes.append((x + sx, y, sw, h))
+
+                    # CRITICAL: Sort sub_boxes left-to-right by X coordinate BEFORE merging
+                    sub_boxes = sorted(sub_boxes, key=lambda b: b[0])
+                    merged_sub = []
+                    for sb in sub_boxes:
+                        if not merged_sub:
+                            merged_sub.append(sb)
+                        else:
+                            px, py, pw, ph = merged_sub[-1]
+                            cx, cy, cw, ch = sb
+                            if cx < (px + pw - 2):
+                                nx = px
+                                ny = y
+                                nw = max(px + pw, cx + cw) - nx
+                                nh = h
+                                merged_sub[-1] = (nx, ny, nw, nh)
+                            else:
+                                merged_sub.append(sb)
+
+                    for mb in merged_sub:
+                        final_primary_boxes.append(mb)
+                else:
+                    final_primary_boxes.append((x, y, w, h))
+
+        if not final_primary_boxes:
             return []
 
-        # Merge detached components (e.g. ং top circle + bottom slant)
-        primary_boxes = DetachedSymbolGrouper.group_detached(raw_p_boxes)
-        primary_boxes = sorted(primary_boxes, key=lambda b: b[0])
+        primary_boxes = sorted(final_primary_boxes, key=lambda b: b[0])
 
         hierarchy_tree = []
-        no_matra_img, _ = MatraRemover.detect_and_remove(thresh_img)
-
         for px, py, pw, ph in primary_boxes:
-            primary_patch_no_matra = no_matra_img[max(0, py):min(h_img, py+ph),
-                                                 max(0, px):min(w_img, px+pw)]
-
-            # Extract secondary sub-segments inside primary box
-            sec_contours, _ = cv2.findContours(primary_patch_no_matra, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            raw_sec_boxes = []
-            if sec_contours:
-                for sc in sec_contours:
-                    sx, sy, sw, sh = cv2.boundingRect(sc)
-                    # Filter out garbage noise specks: sw>=5, sh>=6, area>=30
-                    if sw >= 5 and sh >= 6 and sw * sh >= 30:
-                        raw_sec_boxes.append((px + sx, py + sy, sw, sh))
-
-            # Merge detached sub-components inside primary box
-            secondary_boxes = DetachedSymbolGrouper.group_detached(raw_sec_boxes)
-            secondary_boxes = sorted(secondary_boxes, key=lambda b: b[0])
-
-            # If secondary is empty or identical to primary, set secondary = [primary]
-            if not secondary_boxes:
-                secondary_boxes = [(px, py, pw, ph)]
-
             hierarchy_tree.append({
                 "primary": (px, py, pw, ph),
-                "secondaries": secondary_boxes
+                "secondaries": [(px, py, pw, ph)]
             })
 
         return hierarchy_tree

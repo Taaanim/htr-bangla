@@ -8,7 +8,6 @@ Manages sequence decoding environment transitions, step counters, and reward log
 """
 
 import numpy as np
-import torch
 from typing import List, Dict, Any, Tuple, Optional
 
 # Levenshtein Edit Distance calculation
