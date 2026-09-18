@@ -11,9 +11,9 @@ web_app/client/node_modules/
 web_app/client/dist/
 
 # PyTorch Checkpoints & Weights
-checkpoints/
-*.pth
-*.pt
+# checkpoints/
+# *.pth
+# *.pt
 
 # OS generated files
 .DS_Store
